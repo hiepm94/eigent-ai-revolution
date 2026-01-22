@@ -745,8 +745,8 @@ app.on('window-all-closed', () => {
 });
 '''
         
-        # Write the Electron script
-        with open(electron_script_path, 'w') as f:
+        # Write the Electron script with UTF-8 encoding for Unicode characters
+        with open(electron_script_path, 'w', encoding='utf-8') as f:
             f.write(electron_script_content)
         
         # Find Electron executable

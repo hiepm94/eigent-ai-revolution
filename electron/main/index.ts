@@ -102,6 +102,9 @@ profileInitPromise = findAvailablePort(browser_port).then(async (port) => {
   log.info(`[STORAGE] Main app userData: ${app.getPath('userData')}`);
 });
 
+// Disable proxy to use direct connection (prevents ERR_PROXY_CONNECTION_FAILED)
+app.commandLine.appendSwitch('no-proxy-server');
+
 // Memory optimization settings
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=4096');
 app.commandLine.appendSwitch('force-gpu-mem-available-mb', '512');

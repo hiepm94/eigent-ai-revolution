@@ -968,6 +968,152 @@ class TestAgentWithLLM:
 
 
 @pytest.mark.unit
+class TestListenChatAgentSanitizer:
+    """Test cases for the message sanitizer in ListenChatAgent."""
+    
+    def test_sanitize_tool_messages_removes_orphaned_tool_message(self, mock_task_lock):
+        """Test that orphaned tool messages (without matching tool_calls) are removed."""
+        with patch('app.utils.agent.get_task_lock', return_value=mock_task_lock), \
+             patch('camel.models.ModelFactory.create') as mock_create_model:
+            
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+            
+            agent = ListenChatAgent(
+                api_task_id="test_task",
+                agent_name="TestAgent",
+                model="gpt-4"
+            )
+            
+            # Messages with orphaned tool message (no matching tool_calls in assistant message)
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant"},
+                {"role": "tool", "content": "Result", "tool_call_id": "orphan_123"},
+            ]
+            
+            result = agent._sanitize_tool_messages(messages)
+            
+            # Should only have system message
+            assert len(result) == 1
+            assert result[0]["role"] == "system"
+    
+    def test_sanitize_tool_messages_keeps_valid_tool_message(self, mock_task_lock):
+        """Test that valid tool messages (with matching tool_calls) are kept."""
+        with patch('app.utils.agent.get_task_lock', return_value=mock_task_lock), \
+             patch('camel.models.ModelFactory.create') as mock_create_model:
+            
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+            
+            agent = ListenChatAgent(
+                api_task_id="test_task",
+                agent_name="TestAgent",
+                model="gpt-4"
+            )
+            
+            # Valid message sequence with matching tool_call_id
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant"},
+                {"role": "user", "content": "Search for something"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "call_123", "type": "function", "function": {"name": "search", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "content": "Search result", "tool_call_id": "call_123"},
+            ]
+            
+            result = agent._sanitize_tool_messages(messages)
+            
+            # All messages should be kept
+            assert len(result) == 4
+            assert result[3]["role"] == "tool"
+    
+    def test_sanitize_tool_messages_removes_multiple_orphaned_messages(self, mock_task_lock):
+        """Test that multiple orphaned tool messages are removed."""
+        with patch('app.utils.agent.get_task_lock', return_value=mock_task_lock), \
+             patch('camel.models.ModelFactory.create') as mock_create_model:
+            
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+            
+            agent = ListenChatAgent(
+                api_task_id="test_task",
+                agent_name="TestAgent",
+                model="gpt-4"
+            )
+            
+            # Mixed valid and orphaned messages
+            messages = [
+                {"role": "system", "content": "You are a helpful assistant"},
+                {"role": "user", "content": "Do something"},
+                {"role": "tool", "content": "Orphan 1", "tool_call_id": "orphan_1"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "valid_call", "type": "function", "function": {"name": "fn", "arguments": "{}"}}
+                ]},
+                {"role": "tool", "content": "Valid result", "tool_call_id": "valid_call"},
+                {"role": "tool", "content": "Orphan 2", "tool_call_id": "orphan_2"},
+            ]
+            
+            result = agent._sanitize_tool_messages(messages)
+            
+            # Should keep: system, user, assistant with tool_calls, valid tool response
+            # Should remove: 2 orphaned tool messages
+            assert len(result) == 4
+            roles = [m["role"] for m in result]
+            assert roles == ["system", "user", "assistant", "tool"]
+            assert result[3]["tool_call_id"] == "valid_call"
+    
+    def test_sanitize_tool_messages_empty_list(self, mock_task_lock):
+        """Test sanitizer with empty message list."""
+        with patch('app.utils.agent.get_task_lock', return_value=mock_task_lock), \
+             patch('camel.models.ModelFactory.create') as mock_create_model:
+            
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+            
+            agent = ListenChatAgent(
+                api_task_id="test_task",
+                agent_name="TestAgent",
+                model="gpt-4"
+            )
+            
+            result = agent._sanitize_tool_messages([])
+            assert result == []
+    
+    def test_sanitize_tool_messages_single_message(self, mock_task_lock):
+        """Test sanitizer with single message (early return)."""
+        with patch('app.utils.agent.get_task_lock', return_value=mock_task_lock), \
+             patch('camel.models.ModelFactory.create') as mock_create_model:
+            
+            mock_backend = MagicMock()
+            mock_backend.model_type = "gpt-4"
+            mock_backend.current_model = MagicMock()
+            mock_backend.current_model.model_type = "gpt-4"
+            mock_create_model.return_value = mock_backend
+            
+            agent = ListenChatAgent(
+                api_task_id="test_task",
+                agent_name="TestAgent",
+                model="gpt-4"
+            )
+            
+            messages = [{"role": "system", "content": "Hi"}]
+            result = agent._sanitize_tool_messages(messages)
+            assert result == messages
+
+
+@pytest.mark.unit
 class TestAgentErrorCases:
     """Test error cases and edge conditions for agent utilities."""
     

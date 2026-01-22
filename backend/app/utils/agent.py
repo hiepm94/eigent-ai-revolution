@@ -204,6 +204,100 @@ class ListenChatAgent(ChatAgent):
 
     process_task_id: str = ""
 
+    def _sanitize_tool_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Sanitize message list to ensure tool messages follow proper OpenAI format.
+        
+        This fixes race conditions where tool response messages may appear without
+        a preceding assistant message containing tool_calls.
+        
+        Returns:
+            List of sanitized messages with orphaned tool messages removed.
+        """
+        if not messages or len(messages) < 2:
+            return messages
+        
+        # Build a set of valid tool_call_ids from assistant messages
+        valid_tool_call_ids: set[str] = set()
+        for msg in messages:
+            role = msg.get("role", "")
+            if role == "assistant":
+                tool_calls = msg.get("tool_calls", [])
+                for tc in tool_calls:
+                    tool_id = tc.get("id")
+                    if tool_id:
+                        valid_tool_call_ids.add(tool_id)
+        
+        # Filter out orphaned tool messages
+        sanitized: List[Dict[str, Any]] = []
+        removed_count = 0
+        
+        for i, msg in enumerate(messages):
+            role = msg.get("role", "")
+            
+            if role == "tool":
+                tool_call_id = msg.get("tool_call_id")
+                # Check if this tool message has a valid preceding tool_call
+                if tool_call_id and tool_call_id in valid_tool_call_ids:
+                    sanitized.append(msg)
+                else:
+                    removed_count += 1
+                    traceroot_logger.warning(
+                        f"Agent {self.agent_name}: Removed orphaned tool message at position {i} "
+                        f"with tool_call_id={tool_call_id}. This may indicate a race condition in memory."
+                    )
+            elif role == "function":
+                # Legacy function role - same logic
+                func_name = msg.get("name")
+                # Function messages are less strict, but check for any preceding assistant
+                has_assistant_before = any(
+                    m.get("role") == "assistant" for m in sanitized
+                )
+                if has_assistant_before:
+                    sanitized.append(msg)
+                else:
+                    removed_count += 1
+                    traceroot_logger.warning(
+                        f"Agent {self.agent_name}: Removed orphaned function message at position {i} "
+                        f"for function={func_name}. This may indicate a race condition in memory."
+                    )
+            else:
+                sanitized.append(msg)
+        
+        if removed_count > 0:
+            traceroot_logger.error(
+                f"Agent {self.agent_name}: Removed {removed_count} orphaned tool/function messages "
+                f"from context. Original count: {len(messages)}, New count: {len(sanitized)}. "
+                f"Task ID: {self.api_task_id}, Process Task ID: {self.process_task_id}"
+            )
+        
+        return sanitized
+
+    def _get_context_with_summarization(self) -> Tuple[List[Dict[str, Any]], int]:
+        """Override to add message sanitization before sending to OpenAI (sync version).
+        
+        This ensures tool messages have proper preceding assistant tool_calls,
+        preventing OpenAI API errors due to memory race conditions.
+        """
+        openai_messages, num_tokens = super()._get_context_with_summarization()
+        
+        # Sanitize messages to remove orphaned tool responses
+        sanitized_messages = self._sanitize_tool_messages(openai_messages)
+        
+        return sanitized_messages, num_tokens
+
+    async def _get_context_with_summarization_async(self) -> Tuple[List[Dict[str, Any]], int]:
+        """Override to add message sanitization before sending to OpenAI (async version).
+        
+        This ensures tool messages have proper preceding assistant tool_calls,
+        preventing OpenAI API errors due to memory race conditions.
+        """
+        openai_messages, num_tokens = await super()._get_context_with_summarization_async()
+        
+        # Sanitize messages to remove orphaned tool responses
+        sanitized_messages = self._sanitize_tool_messages(openai_messages)
+        
+        return sanitized_messages, num_tokens
+
     @traceroot.trace()
     def step(
         self,
