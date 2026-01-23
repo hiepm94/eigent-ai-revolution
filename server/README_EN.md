@@ -49,6 +49,11 @@ VITE_PROXY_URL=http://localhost:3001
 npm install
 npm run dev
 ```
+chromium-browser --remote-debugging-port=9222 --no-first-run --no-default-browser-check
+chromium --remote-debugging-port=9222 --no-first-run --no-default-browser-check
+
+pkill -f "eigent-ai-revolution/node_modules/electron"
+
 
 ### Open API docs
 - `http://localhost:3001/docs` (Swagger UI)
