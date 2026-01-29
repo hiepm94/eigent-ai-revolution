@@ -34,6 +34,11 @@ from app.service.task import (
     set_current_task_id,
     ActionDecomposeProgressData,
     ActionDecomposeTextData,
+    ActionRequirementsData,
+    ActionRequirementsValidationData,
+    ActionRequirementsReadyData,
+    ActionProvideRequirementsData,
+    ActionConfirmRequirementsData,
 )
 from camel.toolkits import AgentCommunicationToolkit, ToolkitMessageIntegration
 from app.utils.toolkit.human_toolkit import HumanToolkit
@@ -56,6 +61,7 @@ from app.utils.agent import (
     social_medium_agent,
     task_summary_agent,
     question_confirm_agent,
+    requirements_analyzer_agent,
     set_main_event_loop,
 )
 from app.service.task import Action, Agents
@@ -394,12 +400,101 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                         except Exception as e:
                             logger.error(f"Error cleaning up folder: {e}")
                 else:
-                    logger.info(f"[NEW-QUESTION] Complex task, creating workforce and decomposing")
+                    logger.info(f"[NEW-QUESTION] Complex task detected, starting requirements analysis")
                     # Update the sync_step with new task_id
                     if hasattr(item, 'new_task_id') and item.new_task_id:
                         set_current_task_id(options.project_id, item.new_task_id)
                         task_lock.summary_generated = False
 
+                    # Store the pending question for later processing
+                    task_lock.pending_question = question
+                    task_lock.phase = "analyzing_requirements"
+                    
+                    # Create or reuse requirements analyzer agent
+                    if task_lock.requirements_agent is None:
+                        task_lock.requirements_agent = requirements_analyzer_agent(options)
+                    
+                    # Analyze requirements for this task
+                    logger.info(f"[REQUIREMENTS] Analyzing requirements for task")
+                    requirements_result = await analyze_requirements(
+                        task_lock.requirements_agent, 
+                        question, 
+                        options, 
+                        task_lock
+                    )
+                    
+                    task_lock.requirements = requirements_result.get("requirements", [])
+                    
+                    # If no requirements identified, proceed directly to workforce
+                    if not task_lock.requirements:
+                        logger.info(f"[REQUIREMENTS] No requirements identified, proceeding to workforce")
+                        task_lock.phase = "ready"
+                        yield sse_json("confirmed", {"question": question})
+                        
+                        # Continue with workforce creation (existing flow)
+                        context_for_coordinator = build_context_for_workforce(task_lock, options)
+                        if workforce is not None:
+                            logger.debug(f"[NEW-QUESTION] Reusing existing workforce (id={id(workforce)})")
+                        else:
+                            logger.info(f"[NEW-QUESTION] Creating NEW workforce instance")
+                            (workforce, mcp) = await construct_workforce(options)
+                            for new_agent in options.new_agents:
+                                workforce.add_single_agent_worker(
+                                    format_agent_description(new_agent), await new_agent_model(new_agent, options)
+                                )
+                        task_lock.status = Status.confirmed
+                        clean_task_content = question + options.summary_prompt
+                        camel_task = Task(content=clean_task_content, id=options.task_id)
+                        if len(options.attaches) > 0:
+                            camel_task.additional_info = {Path(file_path).name: file_path for file_path in options.attaches}
+                    else:
+                        # Requirements identified - validate them
+                        logger.info(f"[REQUIREMENTS] Found {len(task_lock.requirements)} requirements, validating...")
+                        task_lock.phase = "validating"
+                        
+                        validation_results, all_ok = await validate_requirements(
+                            task_lock.requirements,
+                            options,
+                            task_lock
+                        )
+                        task_lock.validation_results = validation_results
+                        
+                        # Send requirements to frontend with validation status
+                        requirements_payload = {
+                            "project_id": options.project_id,
+                            "task_id": options.task_id,
+                            "task": question,
+                            "requirements": task_lock.requirements,
+                            "validation_results": validation_results,
+                            "questions_for_user": requirements_result.get("questions_for_user", []),
+                            "summary": requirements_result.get("summary", ""),
+                            "all_validated": all_ok
+                        }
+                        
+                        yield sse_json(Action.requirements.value, requirements_payload)
+                        
+                        if all_ok:
+                            # All requirements validated - ready to proceed
+                            task_lock.phase = "ready"
+                            logger.info(f"[REQUIREMENTS] All requirements validated, ready to proceed")
+                            yield sse_json(Action.requirements_ready.value, {
+                                "project_id": options.project_id,
+                                "task_id": options.task_id,
+                                "message": "All requirements are validated. Ready to start.",
+                                "all_validated": True
+                            })
+                        else:
+                            # Some requirements missing - wait for user to provide them
+                            task_lock.phase = "awaiting_requirements"
+                            logger.info(f"[REQUIREMENTS] Waiting for user to provide missing requirements")
+                            # Continue the loop to wait for user input
+                            continue
+
+                    # If we reach here with ready phase, continue with workforce creation
+                    if task_lock.phase != "ready":
+                        continue
+                        
+                    # Existing workforce creation flow (for when requirements are met)
                     yield sse_json("confirmed", {"question": question})
 
                     context_for_coordinator = build_context_for_workforce(task_lock, options)
@@ -1041,6 +1136,212 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                 await delete_task_lock(task_lock.id)
                 logger.info(f"[LIFECYCLE] Task lock deleted, breaking out of loop")
                 break
+            
+            elif item.action == Action.provide_requirements:
+                # User is providing requirements (e.g., installed MCP, set API key)
+                logger.info("=" * 80)
+                logger.info(f"📦 [REQUIREMENTS] User provided requirements for project {options.project_id}")
+                logger.info("=" * 80)
+                
+                if task_lock.phase != "awaiting_requirements":
+                    logger.warning(f"[REQUIREMENTS] Received provide_requirements but phase is {task_lock.phase}")
+                    yield sse_json("error", {"message": "Not currently awaiting requirements"})
+                    continue
+                
+                # Update options with any new data provided (e.g., new MCP servers)
+                provided_data = item.data if hasattr(item, 'data') else {}
+                if 'mcp_servers' in provided_data:
+                    # Merge new MCP servers with existing
+                    if options.installed_mcp is None:
+                        options.installed_mcp = {"mcpServers": {}}
+                    existing = options.installed_mcp.get("mcpServers", {})
+                    new_servers = provided_data['mcp_servers'].get("mcpServers", {})
+                    existing.update(new_servers)
+                    options.installed_mcp["mcpServers"] = existing
+                    logger.info(f"[REQUIREMENTS] Updated MCP servers: {list(existing.keys())}")
+                
+                # Re-validate requirements
+                logger.info(f"[REQUIREMENTS] Re-validating requirements after user input")
+                task_lock.phase = "validating"
+                
+                validation_results, all_ok = await validate_requirements(
+                    task_lock.requirements,
+                    options,
+                    task_lock
+                )
+                task_lock.validation_results = validation_results
+                
+                # Send updated validation results
+                yield sse_json(Action.requirements_validation.value, {
+                    "project_id": options.project_id,
+                    "task_id": options.task_id,
+                    "results": validation_results,
+                    "all_ok": all_ok
+                })
+                
+                if all_ok:
+                    task_lock.phase = "ready"
+                    logger.info(f"[REQUIREMENTS] All requirements now validated")
+                    yield sse_json(Action.requirements_ready.value, {
+                        "project_id": options.project_id,
+                        "task_id": options.task_id,
+                        "message": "All requirements are validated. Ready to start.",
+                        "all_validated": True
+                    })
+                else:
+                    task_lock.phase = "awaiting_requirements"
+                    logger.info(f"[REQUIREMENTS] Still waiting for missing requirements")
+            
+            elif item.action == Action.confirm_requirements:
+                # User confirms they've provided what they can (proceed even if some optional items missing)
+                logger.info("=" * 80)
+                logger.info(f"✅ [REQUIREMENTS] User confirmed requirements for project {options.project_id}")
+                logger.info("=" * 80)
+                
+                if task_lock.phase not in ("awaiting_requirements", "ready"):
+                    logger.warning(f"[REQUIREMENTS] Received confirm_requirements but phase is {task_lock.phase}")
+                    yield sse_json("error", {"message": "Cannot confirm requirements in current state"})
+                    continue
+                
+                # Check if all required (not optional) requirements are validated
+                has_required_failures = False
+                if task_lock.requirements and task_lock.validation_results:
+                    for req, val_result in zip(task_lock.requirements, task_lock.validation_results):
+                        if req.get("required", True) and not val_result.get("ok", False):
+                            has_required_failures = True
+                            break
+                
+                if has_required_failures:
+                    logger.warning(f"[REQUIREMENTS] Cannot proceed - required items still missing")
+                    yield sse_json("error", {
+                        "message": "Cannot proceed: some required tools/resources are still missing. Please provide them or remove them from the requirements."
+                    })
+                    continue
+                
+                # Proceed to workforce creation
+                task_lock.phase = "ready"
+                question = task_lock.pending_question
+                
+                logger.info(f"[REQUIREMENTS] Proceeding to workforce with question: {question[:100]}...")
+                yield sse_json("confirmed", {"question": question})
+                
+                context_for_coordinator = build_context_for_workforce(task_lock, options)
+                
+                # Create workforce
+                if workforce is not None:
+                    logger.debug(f"[REQUIREMENTS] Reusing existing workforce (id={id(workforce)})")
+                else:
+                    logger.info(f"[REQUIREMENTS] Creating NEW workforce instance")
+                    (workforce, mcp) = await construct_workforce(options)
+                    for new_agent in options.new_agents:
+                        workforce.add_single_agent_worker(
+                            format_agent_description(new_agent), await new_agent_model(new_agent, options)
+                        )
+                task_lock.status = Status.confirmed
+                
+                # Create camel_task
+                clean_task_content = question + options.summary_prompt
+                camel_task = Task(content=clean_task_content, id=options.task_id)
+                if len(options.attaches) > 0:
+                    camel_task.additional_info = {Path(file_path).name: file_path for file_path in options.attaches}
+                
+                # Start decomposition (copied from existing flow)
+                stream_state = {"subtasks": [], "seen_ids": set(), "last_content": ""}
+                state_holder: dict[str, Any] = {"sub_tasks": [], "summary_task": ""}
+
+                def on_stream_batch(new_tasks: list[Task], is_final: bool = False):
+                    fresh_tasks = [t for t in new_tasks if t.id not in stream_state["seen_ids"]]
+                    for t in fresh_tasks:
+                        stream_state["seen_ids"].add(t.id)
+                    stream_state["subtasks"].extend(fresh_tasks)
+
+                def on_stream_text(chunk):
+                    try:
+                        accumulated_content = chunk.msg.content if hasattr(chunk, 'msg') and chunk.msg else str(chunk)
+                        last_content = stream_state["last_content"]
+                        if accumulated_content.startswith(last_content):
+                            delta_content = accumulated_content[len(last_content):]
+                        else:
+                            delta_content = accumulated_content
+                        stream_state["last_content"] = accumulated_content
+                        if delta_content:
+                            asyncio.run_coroutine_threadsafe(
+                                task_lock.put_queue(
+                                    ActionDecomposeTextData(
+                                        data={
+                                            "project_id": options.project_id,
+                                            "task_id": options.task_id,
+                                            "content": delta_content,
+                                        }
+                                    )
+                                ),
+                                event_loop,
+                            )
+                    except Exception as e:
+                        logger.warning(f"Failed to stream decomposition text: {e}")
+
+                async def run_decomposition():
+                    nonlocal camel_task, summary_task_content
+                    try:
+                        decomposed_sub_tasks = await asyncio.to_thread(
+                            workforce.eigent_make_sub_tasks,
+                            camel_task,
+                            context_for_coordinator,
+                            on_stream_batch,
+                            on_stream_text,
+                        )
+                        if stream_state["subtasks"]:
+                            decomposed_sub_tasks = stream_state["subtasks"]
+                        state_holder["sub_tasks"] = decomposed_sub_tasks
+                        logger.info(f"Task decomposed into {len(decomposed_sub_tasks)} subtasks")
+                        try:
+                            setattr(task_lock, "decompose_sub_tasks", decomposed_sub_tasks)
+                        except Exception:
+                            pass
+
+                        summary_task_agent = task_summary_agent(options)
+                        try:
+                            summary_task_content = await asyncio.wait_for(
+                                summary_task(summary_task_agent, camel_task), timeout=10
+                            )
+                            task_lock.summary_generated = True
+                        except asyncio.TimeoutError:
+                            logger.warning("summary_task timeout")
+                            task_lock.summary_generated = True
+                            content_preview = camel_task.content if hasattr(camel_task, "content") else ""
+                            if content_preview is None:
+                                content_preview = ""
+                            summary_task_content = (content_preview[:80] + "...") if len(content_preview) > 80 else content_preview
+                            summary_task_content = f"Task|{summary_task_content}"
+                        except Exception:
+                            task_lock.summary_generated = True
+                            summary_task_content = f"Task|{camel_task.content[:80] if camel_task.content else 'Unknown'}..."
+
+                        state_holder["summary_task"] = summary_task_content
+                        try:
+                            setattr(task_lock, "summary_task_content", summary_task_content)
+                        except Exception:
+                            pass
+
+                        payload = {
+                            "project_id": options.project_id,
+                            "task_id": options.task_id,
+                            "sub_tasks": tree_sub_tasks(camel_task.subtasks),
+                            "delta_sub_tasks": tree_sub_tasks(decomposed_sub_tasks),
+                            "is_final": True,
+                            "summary_task": summary_task_content,
+                        }
+                        await task_lock.put_queue(ActionDecomposeProgressData(data=payload))
+                    except Exception as e:
+                        logger.error(f"Error in background decomposition: {e}", exc_info=True)
+
+                bg_task = asyncio.create_task(run_decomposition())
+                task_lock.add_background_task(bg_task)
+                
+                # Reset phase for next task
+                task_lock.phase = "idle"
+                task_lock.pending_question = None
+            
             else:
                 logger.warning(f"Unknown action: {item.action}")
         except ModelProcessingError as e:
@@ -1183,6 +1484,205 @@ Is this a complex task? (yes/no):"""
     except Exception as e:
         logger.error(f"Error in question_confirm: {e}")
         return True
+
+
+async def analyze_requirements(agent: ListenChatAgent, question: str, options: Chat, task_lock: TaskLock | None = None) -> dict:
+    """Analyze the user's task and identify required tools/resources.
+    
+    Returns a dict with:
+    - requirements: list of requirement items
+    - questions_for_user: optional clarifying questions
+    - summary: brief summary of requirements
+    """
+    context_prompt = ""
+    if task_lock:
+        context_prompt = build_conversation_context(task_lock, header="=== Previous Conversation ===")
+    
+    # Get currently available tools/resources for context
+    available_context = []
+    if options.installed_mcp:
+        available_context.append(f"Available MCP servers: {list(options.installed_mcp.get('mcpServers', {}).keys())}")
+    if options.attaches:
+        available_context.append(f"Attached files: {options.attaches}")
+    
+    available_str = "\n".join(available_context) if available_context else "No tools/resources currently configured."
+    
+    prompt = f"""{context_prompt}
+
+=== CURRENTLY AVAILABLE RESOURCES ===
+{available_str}
+
+=== USER'S TASK ===
+{question}
+
+Analyze this task and identify ALL tools, resources, and access permissions needed to complete it successfully.
+Consider what MCP servers, API keys, file access, browser capabilities, or terminal access might be required.
+
+Respond with a valid JSON object following the specified format."""
+
+    try:
+        resp = agent.step(prompt)
+        
+        if not resp or not resp.msgs or len(resp.msgs) == 0:
+            logger.warning("No response from requirements analyzer, returning empty requirements")
+            return {"requirements": [], "questions_for_user": [], "summary": "Unable to analyze requirements"}
+        
+        content = resp.msgs[0].content
+        if not content:
+            logger.warning("Empty content from requirements analyzer")
+            return {"requirements": [], "questions_for_user": [], "summary": "Unable to analyze requirements"}
+        
+        # Try to parse JSON from response
+        try:
+            # Handle potential markdown code blocks
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                content = content.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(content)
+            
+            # Validate and normalize the result
+            if "requirements" not in result:
+                result["requirements"] = []
+            if "questions_for_user" not in result:
+                result["questions_for_user"] = []
+            if "summary" not in result:
+                result["summary"] = f"Identified {len(result['requirements'])} requirements"
+            
+            # Add status field to each requirement
+            for req in result["requirements"]:
+                if "status" not in req:
+                    req["status"] = "missing"
+                if "id" not in req:
+                    req["id"] = f"{req.get('type', 'unknown')}:{req.get('name', 'unknown').lower().replace(' ', '_')}"
+            
+            logger.info(f"Requirements analysis complete: {len(result['requirements'])} requirements identified")
+            return result
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse requirements JSON: {e}")
+            # Return a conservative fallback
+            return {
+                "requirements": [],
+                "questions_for_user": ["Could you please clarify what tools or resources you have available for this task?"],
+                "summary": "Unable to parse requirements - please provide more details"
+            }
+    
+    except Exception as e:
+        logger.error(f"Error in analyze_requirements: {e}")
+        return {"requirements": [], "questions_for_user": [], "summary": f"Error analyzing requirements: {str(e)}"}
+
+
+async def validate_requirements(requirements: list, options: Chat, task_lock: TaskLock) -> tuple[list, bool]:
+    """Validate access to all required tools/resources.
+    
+    Returns:
+    - results: list of validation results per requirement
+    - all_ok: True if all required validations passed
+    """
+    results = []
+    all_ok = True
+    
+    for req in requirements:
+        req_id = req.get("id", "unknown")
+        req_type = req.get("type", "unknown")
+        req_name = req.get("name", "Unknown")
+        is_required = req.get("required", True)
+        
+        validation_result = {
+            "id": req_id,
+            "name": req_name,
+            "type": req_type,
+            "ok": False,
+            "message": ""
+        }
+        
+        try:
+            if req_type == "mcp_server":
+                # Check if MCP server is installed
+                mcp_servers = options.installed_mcp or {}
+                installed_servers = list(mcp_servers.get("mcpServers", {}).keys())
+                
+                # Simple name matching
+                server_name = req_name.lower().replace(" ", "").replace("_", "").replace("-", "")
+                is_installed = any(
+                    server_name in s.lower().replace(" ", "").replace("_", "").replace("-", "") 
+                    for s in installed_servers
+                )
+                
+                if is_installed:
+                    validation_result["ok"] = True
+                    validation_result["message"] = f"MCP server '{req_name}' is installed"
+                else:
+                    validation_result["message"] = f"MCP server '{req_name}' not found. Please install it from the MCP settings."
+                    
+            elif req_type == "api_key":
+                # Check for common API key environment variables
+                key_name = req_name.upper().replace(" ", "_").replace("-", "_")
+                possible_keys = [
+                    key_name,
+                    f"{key_name}_KEY",
+                    f"{key_name}_API_KEY",
+                    key_name.replace("_API", "")
+                ]
+                
+                found_key = any(os.getenv(k) for k in possible_keys)
+                if found_key:
+                    validation_result["ok"] = True
+                    validation_result["message"] = f"API key for '{req_name}' found"
+                else:
+                    validation_result["message"] = f"API key for '{req_name}' not found in environment"
+                    
+            elif req_type == "file_access":
+                # Check if working directory exists and is accessible
+                working_dir = get_working_directory(options, task_lock)
+                if working_dir and os.path.exists(working_dir):
+                    if os.access(working_dir, os.R_OK):
+                        validation_result["ok"] = True
+                        validation_result["message"] = f"File access available at {working_dir}"
+                    else:
+                        validation_result["message"] = f"Cannot read from {working_dir}"
+                else:
+                    # Check if attachments are provided
+                    if options.attaches:
+                        validation_result["ok"] = True
+                        validation_result["message"] = f"File access via attachments: {len(options.attaches)} file(s)"
+                    else:
+                        validation_result["message"] = "No working directory or attachments provided"
+                        
+            elif req_type == "browser":
+                # Browser capability is generally available
+                validation_result["ok"] = True
+                validation_result["message"] = "Browser agent available"
+                
+            elif req_type == "terminal":
+                # Terminal capability is generally available
+                working_dir = get_working_directory(options, task_lock)
+                if working_dir and os.path.exists(working_dir):
+                    validation_result["ok"] = True
+                    validation_result["message"] = f"Terminal access available at {working_dir}"
+                else:
+                    validation_result["ok"] = True
+                    validation_result["message"] = "Terminal access available (default directory)"
+                    
+            else:
+                # Unknown type - mark as needing user confirmation
+                validation_result["ok"] = False
+                validation_result["message"] = f"Please confirm you have access to: {req_name}"
+                
+        except Exception as e:
+            logger.error(f"Error validating requirement {req_id}: {e}")
+            validation_result["message"] = f"Validation error: {str(e)}"
+        
+        results.append(validation_result)
+        
+        # Track overall status (only required items affect all_ok)
+        if is_required and not validation_result["ok"]:
+            all_ok = False
+    
+    logger.info(f"Requirements validation complete: {len(results)} checked, all_ok={all_ok}")
+    return results, all_ok
 
 
 async def summary_task(agent: ListenChatAgent, task: Task) -> str:

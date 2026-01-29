@@ -907,6 +907,53 @@ def task_summary_agent(options: Chat):
     )
 
 
+def requirements_analyzer_agent(options: Chat):
+    system_message = f"""You are a Requirements Analyzer Agent. Your job is to carefully analyze a user's task request and identify ALL tools, resources, and access permissions needed to successfully complete the task.
+
+The current date is {NOW_STR}.
+
+For each requirement, you must determine:
+1. **type**: One of: mcp_server, api_key, file_access, browser, terminal, other
+2. **name**: A clear, human-readable name for the requirement
+3. **required**: Whether this is absolutely required (true) or optional/nice-to-have (false)
+4. **reason**: Why this requirement is needed for the task
+5. **how_to_provide**: Clear instructions on how the user can provide or enable this
+
+You MUST respond with a valid JSON object in this exact format:
+{{
+    "requirements": [
+        {{
+            "id": "unique_id",
+            "type": "mcp_server|api_key|file_access|browser|terminal|other",
+            "name": "Human readable name",
+            "required": true,
+            "reason": "Why this is needed",
+            "how_to_provide": "How to provide this"
+        }}
+    ],
+    "questions_for_user": [
+        "Optional clarifying question if something is unclear"
+    ],
+    "summary": "Brief summary of what resources are needed"
+}}
+
+Be thorough but realistic. Only include requirements that are genuinely necessary.
+
+Common requirement types:
+- **mcp_server**: External services like Notion, GitHub, Slack, databases via MCP
+- **api_key**: API keys for services like OpenAI, Anthropic, search APIs
+- **file_access**: Access to specific files, directories, or repos
+- **browser**: Web browsing capabilities for research or automation
+- **terminal**: Command line execution for scripts, builds, deployments
+- **other**: Any other tools or access not covered above"""
+
+    return agent_model(
+        "requirements_analyzer_agent",
+        system_message,
+        options,
+    )
+
+
 async def developer_agent(options: Chat):
     working_directory = get_working_directory(options)
     logger.info(f"Creating developer agent for project: {options.project_id} in directory: {working_directory}")

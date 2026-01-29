@@ -58,6 +58,13 @@ interface Task {
 	isContextExceeded?: boolean;
 	// Streaming decompose text - stored separately to avoid frequent re-renders
 	streamingDecomposeText: string;
+	// Requirements gathering phase
+	requirements?: RequirementItem[];
+	requirementsValidation?: ValidationResult[];
+	requirementsAllValidated?: boolean;
+	requirementsSummary?: string;
+	requirementsQuestions?: string[];
+	requirementsReady?: boolean;
 }
 
 export interface ChatStore {
@@ -1032,6 +1039,74 @@ const chatStore = (initial?: Partial<ChatStore>) => createStore<ChatStore>()(
 						})
 						return;
 					}
+
+					// Requirements gathering phase - new flow
+					if (agentMessages.step === "requirements") {
+						const { requirements, validation_results, questions_for_user, summary, all_validated, task } = agentMessages.data;
+						console.log("[REQUIREMENTS] Received requirements:", requirements);
+						
+						// Store requirements in task state for UI rendering
+						if (tasks[currentTaskId]) {
+							tasks[currentTaskId].requirements = requirements;
+							tasks[currentTaskId].requirementsValidation = validation_results;
+							tasks[currentTaskId].requirementsAllValidated = all_validated;
+							tasks[currentTaskId].requirementsSummary = summary;
+							tasks[currentTaskId].requirementsQuestions = questions_for_user;
+						}
+						
+						// Add a message to display requirements to user
+						addMessages(currentTaskId, {
+							id: generateUniqueId(),
+							role: "agent",
+							content: summary || "Analyzing required tools and resources...",
+							step: "requirements",
+							requirements: requirements,
+							validationResults: validation_results,
+							allValidated: all_validated,
+							questionsForUser: questions_for_user,
+						});
+						return;
+					}
+
+					if (agentMessages.step === "requirements_validation") {
+						const { results, all_ok } = agentMessages.data;
+						console.log("[REQUIREMENTS] Validation results:", results, "all_ok:", all_ok);
+						
+						// Update task state
+						if (tasks[currentTaskId]) {
+							tasks[currentTaskId].requirementsValidation = results;
+							tasks[currentTaskId].requirementsAllValidated = all_ok;
+						}
+						
+						// Update the existing requirements message or add new one
+						const existingReqMsg = tasks[currentTaskId]?.messages.findLast((m: Message) => m.step === 'requirements');
+						if (existingReqMsg) {
+							existingReqMsg.validationResults = results;
+							existingReqMsg.allValidated = all_ok;
+						}
+						return;
+					}
+
+					if (agentMessages.step === "requirements_ready") {
+						const { message, all_validated } = agentMessages.data;
+						console.log("[REQUIREMENTS] Ready:", message);
+						
+						// Update task state
+						if (tasks[currentTaskId]) {
+							tasks[currentTaskId].requirementsAllValidated = all_validated;
+							tasks[currentTaskId].requirementsReady = true;
+						}
+						
+						// Add a notice message
+						addMessages(currentTaskId, {
+							id: generateUniqueId(),
+							role: "agent",
+							content: message || "All requirements validated. Ready to start.",
+							step: "requirements_ready",
+						});
+						return;
+					}
+
 					// Task State
 					if (agentMessages.step === "task_state") {
 						const { state, task_id, result, failure_count } = agentMessages.data;

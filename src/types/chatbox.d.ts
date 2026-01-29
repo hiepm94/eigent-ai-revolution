@@ -90,6 +90,24 @@ declare global {
 		};
 	}
 
+	interface RequirementItem {
+		id: string;
+		type: string;
+		name: string;
+		required: boolean;
+		reason: string;
+		how_to_provide: string;
+		status: string;
+	}
+
+	interface ValidationResult {
+		id: string;
+		name: string;
+		type: string;
+		ok: boolean;
+		message: string;
+	}
+
 	interface Message {
 		id: string;
 		role: "user" | "agent";
@@ -109,6 +127,11 @@ declare global {
 		summary?: string;
 		agent_name?: string;
 		attaches?: File[]
+		// Requirements gathering phase
+		requirements?: RequirementItem[];
+		validationResults?: ValidationResult[];
+		allValidated?: boolean;
+		questionsForUser?: string[];
 	}
 
 	interface AgentMessage {
@@ -141,6 +164,16 @@ declare global {
 			current_length?: number;
 			max_length?: number;
 			text?: string;
+			// Requirements gathering phase
+			requirements?: RequirementItem[];
+			validation_results?: ValidationResult[];
+			questions_for_user?: string[];
+			summary?: string;
+			all_validated?: boolean;
+			task?: string;
+			// Requirements validation
+			results?: ValidationResult[];
+			all_ok?: boolean;
 		};
 		status?: 'running' | 'filled' | 'completed';
 	}

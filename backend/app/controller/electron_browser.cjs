@@ -1,3 +1,4 @@
+
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
 
@@ -64,7 +65,7 @@ app.whenReady().then(async () => {
     }
   });
 
-  // Create navigation bar and webview HTML
+  // Create navigation bar and webview
   const html = `
 <!DOCTYPE html>
 <html>
@@ -78,7 +79,7 @@ app.whenReady().then(async () => {
       height: 100vh;
       overflow: hidden;
     }
-
+    
     #nav-bar {
       display: flex;
       align-items: center;
@@ -87,7 +88,7 @@ app.whenReady().then(async () => {
       border-bottom: 1px solid #ddd;
       gap: 8px;
     }
-
+    
     button {
       padding: 6px 12px;
       border: 1px solid #ccc;
@@ -99,16 +100,16 @@ app.whenReady().then(async () => {
       align-items: center;
       gap: 4px;
     }
-
+    
     button:hover:not(:disabled) {
       background: #f0f0f0;
     }
-
+    
     button:disabled {
       opacity: 0.5;
       cursor: not-allowed;
     }
-
+    
     #url-input {
       flex: 1;
       padding: 8px 12px;
@@ -116,22 +117,22 @@ app.whenReady().then(async () => {
       border-radius: 4px;
       font-size: 14px;
     }
-
+    
     #url-input:focus {
       outline: none;
       border-color: #4285f4;
     }
-
+    
     #webview {
       flex: 1;
       width: 100%;
       border: none;
     }
-
+    
     .nav-icon {
       font-size: 16px;
     }
-
+    
     #loading-indicator {
       width: 20px;
       height: 20px;
@@ -141,16 +142,16 @@ app.whenReady().then(async () => {
       animation: spin 1s linear infinite;
       display: none;
     }
-
+    
     @keyframes spin {
       0% { transform: rotate(0deg); }
       100% { transform: rotate(360deg); }
     }
-
+    
     .loading #loading-indicator {
       display: block;
     }
-
+    
     .loading #reload-btn .nav-icon {
       display: none;
     }
@@ -159,34 +160,34 @@ app.whenReady().then(async () => {
 <body>
   <div id="nav-bar">
     <button id="back-btn" title="Back">
-      <span class="nav-icon">&#x2190;</span>
+      <span class="nav-icon">←</span>
     </button>
     <button id="forward-btn" title="Forward">
-      <span class="nav-icon">&#x2192;</span>
+      <span class="nav-icon">→</span>
     </button>
     <button id="reload-btn" title="Reload">
-      <span class="nav-icon">&#x21bb;</span>
+      <span class="nav-icon">↻</span>
       <div id="loading-indicator"></div>
     </button>
     <button id="home-btn" title="Home">
-      <span class="nav-icon">&#x1F3E0;</span>
+      <span class="nav-icon">🏠</span>
     </button>
     <input type="text" id="url-input" placeholder="Enter URL..." />
     <button id="go-btn">Go</button>
     <button id="linkedin-btn" style="background: #0077B5; color: white; border-color: #0077B5;">
       LinkedIn
     </button>
-    <button id="info-btn" title="Show Info">&#x2139;&#xFE0F;</button>
+    <button id="info-btn" title="Show Info">ℹ️</button>
   </div>
-
+  
   <webview id="webview" src="${startUrl}" partition="persist:user_login"></webview>
-
+  
   <div id="info-panel" style="display: none; position: absolute; top: 50px; right: 10px; background: white; border: 1px solid #ccc; padding: 15px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); z-index: 1000; max-width: 400px; font-size: 12px;">
     <h4 style="margin: 0 0 10px 0;">Browser Info</h4>
     <div id="info-content"></div>
     <button onclick="document.getElementById('info-panel').style.display='none'" style="margin-top: 10px;">Close</button>
   </div>
-
+  
   <script>
     const webview = document.getElementById('webview');
     const backBtn = document.getElementById('back-btn');
@@ -200,11 +201,11 @@ app.whenReady().then(async () => {
     const infoBtn = document.getElementById('info-btn');
     const infoPanel = document.getElementById('info-panel');
     const infoContent = document.getElementById('info-content');
-
+    
     // Show info panel
     infoBtn.addEventListener('click', () => {
       const { ipcRenderer } = require('electron');
-
+      
       // Get browser info
       const info = {
         'Chrome Version': process.versions.chrome,
@@ -215,40 +216,40 @@ app.whenReady().then(async () => {
         'Platform': process.platform,
         'Architecture': process.arch
       };
-
+      
       // Also check webview partition info
       const partition = webview.partition || 'default';
       info['WebView Partition'] = partition;
-
+      
       // Format info as HTML
       let html = '<table style="width: 100%; border-collapse: collapse;">';
       for (const [key, value] of Object.entries(info)) {
         html += '<tr><td style="padding: 4px; border-bottom: 1px solid #eee;"><strong>' + key + ':</strong></td><td style="padding: 4px; border-bottom: 1px solid #eee; word-break: break-all;">' + value + '</td></tr>';
       }
       html += '</table>';
-
+      
       infoContent.innerHTML = html;
       infoPanel.style.display = 'block';
     });
-
+    
     // Update navigation buttons
     function updateNavButtons() {
       backBtn.disabled = !webview.canGoBack();
       forwardBtn.disabled = !webview.canGoForward();
     }
-
+    
     // Navigate to URL
     function navigateToUrl() {
       let url = urlInput.value.trim();
       if (!url) return;
-
+      
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
         url = 'https://' + url;
       }
-
+      
       webview.loadURL(url);
     }
-
+    
     // Event listeners
     backBtn.addEventListener('click', () => webview.goBack());
     forwardBtn.addEventListener('click', () => webview.goForward());
@@ -256,39 +257,39 @@ app.whenReady().then(async () => {
     homeBtn.addEventListener('click', () => webview.loadURL('${startUrl}'));
     goBtn.addEventListener('click', navigateToUrl);
     linkedinBtn.addEventListener('click', () => webview.loadURL('https://www.linkedin.com'));
-
+    
     urlInput.addEventListener('keypress', (e) => {
       if (e.key === 'Enter') {
         navigateToUrl();
       }
     });
-
+    
     // WebView events
     webview.addEventListener('did-start-loading', () => {
       navBar.classList.add('loading');
     });
-
+    
     webview.addEventListener('did-stop-loading', () => {
       navBar.classList.remove('loading');
       updateNavButtons();
     });
-
+    
     webview.addEventListener('did-navigate', (e) => {
       urlInput.value = e.url;
       updateNavButtons();
     });
-
+    
     webview.addEventListener('did-navigate-in-page', (e) => {
       urlInput.value = e.url;
       updateNavButtons();
     });
-
+    
     webview.addEventListener('new-window', (e) => {
       // Open new windows in the same webview
       e.preventDefault();
       webview.loadURL(e.url);
     });
-
+    
     // Initialize
     updateNavButtons();
   </script>
@@ -314,7 +315,7 @@ app.whenReady().then(async () => {
       }
     }, 5000); // Check every 5 seconds
   });
-
+  
   win.on('closed', async () => {
     console.log('[ELECTRON BROWSER] Window closed, preparing to quit...');
 

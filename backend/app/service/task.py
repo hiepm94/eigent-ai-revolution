@@ -60,6 +60,12 @@ class Action(str, Enum):
     remove_task = "remove_task"  # user -> backend
     skip_task = "skip_task"  # user -> backend
     timeout = "timeout"  # backend -> user (task timeout error)
+    # Requirements gathering phase (new flow)
+    requirements = "requirements"  # backend -> user (list of required tools/resources)
+    requirements_validation = "requirements_validation"  # backend -> user (validation results)
+    requirements_ready = "requirements_ready"  # backend -> user (all requirements validated)
+    provide_requirements = "provide_requirements"  # user -> backend (user provides requirements)
+    confirm_requirements = "confirm_requirements"  # user -> backend (user confirms to proceed)
 
 
 class ActionImproveData(BaseModel):
@@ -235,6 +241,40 @@ class ActionSkipTaskData(BaseModel):
     project_id: str
 
 
+class RequirementItem(TypedDict):
+    id: str
+    type: str  # mcp_server, api_key, file_access, browser, terminal, other
+    name: str
+    required: bool
+    reason: str
+    how_to_provide: str
+    status: str  # missing, provided, validated, failed
+
+
+class ActionRequirementsData(BaseModel):
+    action: Literal[Action.requirements] = Action.requirements
+    data: dict
+
+
+class ActionRequirementsValidationData(BaseModel):
+    action: Literal[Action.requirements_validation] = Action.requirements_validation
+    data: dict
+
+
+class ActionRequirementsReadyData(BaseModel):
+    action: Literal[Action.requirements_ready] = Action.requirements_ready
+    data: dict
+
+
+class ActionProvideRequirementsData(BaseModel):
+    action: Literal[Action.provide_requirements] = Action.provide_requirements
+    data: dict
+
+
+class ActionConfirmRequirementsData(BaseModel):
+    action: Literal[Action.confirm_requirements] = Action.confirm_requirements
+
+
 ActionData = (
     ActionImproveData
     | ActionStartData
@@ -264,6 +304,11 @@ ActionData = (
     | ActionSkipTaskData
     | ActionDecomposeTextData
     | ActionDecomposeProgressData
+    | ActionRequirementsData
+    | ActionRequirementsValidationData
+    | ActionRequirementsReadyData
+    | ActionProvideRequirementsData
+    | ActionConfirmRequirementsData
 )
 
 
@@ -307,6 +352,18 @@ class TaskLock:
     current_task_id: Optional[str]
     """Current task ID to be used in SSE responses"""
 
+    # Requirements gathering phase fields
+    phase: str
+    """Current phase: idle, analyzing_requirements, awaiting_requirements, validating, ready"""
+    requirements: Optional[List[Dict[str, Any]]]
+    """Structured requirements from analyzer"""
+    validation_results: Optional[List[Dict[str, Any]]]
+    """Validation results per requirement"""
+    pending_question: Optional[str]
+    """The complex task content that triggered requirements flow"""
+    requirements_agent: Optional[Any]
+    """Persistent requirements analyzer agent"""
+
     def __init__(self, id: str, queue: asyncio.Queue, human_input: dict) -> None:
         self.id = id
         self.queue = queue
@@ -322,6 +379,13 @@ class TaskLock:
         self.last_task_summary = ""
         self.question_agent = None
         self.current_task_id = None
+
+        # Initialize requirements gathering phase fields
+        self.phase = "idle"
+        self.requirements = None
+        self.validation_results = None
+        self.pending_question = None
+        self.requirements_agent = None
 
         logger.info("Task lock initialized", extra={"task_id": id, "created_at": self.created_at.isoformat()})
 
