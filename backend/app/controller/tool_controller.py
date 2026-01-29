@@ -1,8 +1,22 @@
+# ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
+
 from fastapi import APIRouter, HTTPException
 from app.utils.toolkit.notion_mcp_toolkit import NotionMCPToolkit
 from app.utils.toolkit.google_calendar_toolkit import GoogleCalendarToolkit
 from app.utils.oauth_state_manager import oauth_state_manager
-from utils import traceroot_wrapper as traceroot
+import logging
 from camel.toolkits.hybrid_browser_toolkit.hybrid_browser_toolkit_ts import (
     HybridBrowserToolkit as BaseHybridBrowserToolkit,
 )
@@ -10,7 +24,7 @@ from app.utils.cookie_manager import CookieManager
 import os
 import uuid
 
-logger = traceroot.get_logger("tool_controller")
+logger = logging.getLogger("tool_controller")
 router = APIRouter()
 
 
@@ -347,7 +361,7 @@ async def open_browser_login():
                 "note": "Your login data will be saved in the profile."
             }
         
-        # Create Electron browser script with .cjs extension for CommonJS
+        # Use static Electron browser script
         electron_script_path = os.path.join(os.path.dirname(__file__), "electron_browser.cjs")
         electron_script_content = '''
 const { app, BrowserWindow, ipcMain } = require('electron');
@@ -775,7 +789,9 @@ app.on('window-all-closed', () => {
             cwd=app_dir,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Redirect stderr to stdout
-            universal_newlines=True,
+            text=True,
+            encoding='utf-8',
+            errors='replace',  # Replace undecodable chars instead of crashing
             bufsize=1  # Line buffered
         )
 
@@ -791,17 +807,7 @@ app.on('window-all-closed', () => {
         # Wait a bit for Electron to start
         import asyncio
         await asyncio.sleep(3)
-        
-        # Clean up the script file after a delay
-        async def cleanup_script():
-            await asyncio.sleep(10)
-            try:
-                os.remove(electron_script_path)
-            except:
-                pass
-        
-        asyncio.create_task(cleanup_script())
-        
+
         logger.info(f"[PROFILE USER LOGIN] Electron browser launched with PID {process.pid}")
 
         return {
