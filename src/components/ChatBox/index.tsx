@@ -182,22 +182,17 @@ export default function ChatBox(): JSX.Element {
     chatStore.setHasMessages(_taskId as string, true);
     if (!_taskId) return;
 
-    // Multi-turn support: Check if task is running or planning (splitting/confirm)
+    // Multi-turn support: Check if task is running or planning
     const task = chatStore.tasks[_taskId];
     const requiresHumanReply = Boolean(task?.activeAsk);
     const isTaskBusy =
       // running or paused counts as busy
       (task.status === 'running' && task.hasMessages) ||
       task.status === 'pause' ||
-      // splitting phase: has to_sub_tasks not confirmed OR skeleton computing
-      task.messages.some((m) => m.step === 'to_sub_tasks' && !m.isConfirm) ||
-      (!task.messages.find((m) => m.step === 'to_sub_tasks') &&
-        !task.hasWaitComfirm &&
-        task.messages.length > 0) ||
-      task.isTakeControl ||
-      // explicit confirm wait while task is pending but card not confirmed yet
-      (!!task.messages.find((m) => m.step === 'to_sub_tasks' && !m.isConfirm) &&
-        task.status === 'pending');
+      // Only block when task is actively being controlled
+      task.isTakeControl;
+      // Removed: splitting phase and skeleton/computing phase checks
+      // to allow input during task decomposition
     const isReplayChatStore = task?.type === 'replay';
     if (!requiresHumanReply && isTaskBusy && !isReplayChatStore) {
       toast.error(
@@ -736,17 +731,8 @@ export default function ChatBox(): JSX.Element {
       (m) => m.step === 'to_sub_tasks' && !m.isConfirm
     );
 
-    // Determine if we're in the "splitting in progress" phase (skeleton visible)
-    // Only show splitting if there's NO to_sub_tasks message yet (not even confirmed)
-    const isSkeletonPhase =
-      (task.status !== 'finished' &&
-        !anyToSubTasksMessage &&
-        !task.hasWaitComfirm &&
-        task.messages.length > 0) ||
-      (task.isTakeControl && !anyToSubTasksMessage);
-    if (isSkeletonPhase) {
-      return 'splitting';
-    }
+    // Skip splitting phase UI - don't lock the chatbox until tasks are ready to execute
+    // The skeleton/splitting phases are now hidden, so we go directly to confirm or input state
 
     // After splitting completes and TaskCard is awaiting user confirmation,
     // the Task becomes 'pending' and we show the confirm state.
@@ -758,9 +744,9 @@ export default function ChatBox(): JSX.Element {
       return 'confirm';
     }
 
-    // If subtasks exist but not yet confirmed while task is still running, keep showing splitting
+    // If subtasks exist but not yet confirmed while task is still running, show confirm instead of splitting
     if (toSubTasksMessage && !toSubTasksMessage.isConfirm) {
-      return 'splitting';
+      return 'confirm';
     }
 
     // Check task status
@@ -900,13 +886,10 @@ export default function ChatBox(): JSX.Element {
       // running or paused
       task.status === 'running' ||
       task.status === 'pause' ||
-      // splitting phase
-      task.messages.some((m) => m.step === 'to_sub_tasks' && !m.isConfirm) ||
-      // skeleton/computing phase
-      (!task.messages.find((m) => m.step === 'to_sub_tasks') &&
-        !task.hasWaitComfirm &&
-        task.messages.length > 0) ||
+      // Only block when task is actively being controlled
       task.isTakeControl
+      // Removed: splitting phase and skeleton/computing phase checks
+      // to allow input during task decomposition
     );
   }, [chatStore.activeTaskId, chatStore.tasks]);
 
