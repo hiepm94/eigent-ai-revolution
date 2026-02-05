@@ -420,22 +420,17 @@ export default function ChatBox(): JSX.Element {
     chatStore.setHasMessages(_taskId as string, true);
     if (!_taskId) return;
 
-    // Multi-turn support: Check if task is running or planning (splitting/confirm)
+    // Multi-turn support: Check if task is running or planning
     const task = chatStore.tasks[_taskId];
     const requiresHumanReply = Boolean(task?.activeAsk);
     const isTaskBusy =
       // running or paused counts as busy
-      (task.status === ChatTaskStatus.RUNNING && task.hasMessages) ||
-      task.status === ChatTaskStatus.PAUSE ||
-      // splitting phase: has to_sub_tasks not confirmed OR skeleton computing
-      task.messages.some((m) => m.step === AgentStep.TO_SUB_TASKS && !m.isConfirm) ||
-      (!task.messages.find((m) => m.step === AgentStep.TO_SUB_TASKS) &&
-        !task.hasWaitComfirm &&
-        task.messages.length > 0) ||
-      task.isTakeControl ||
-      // explicit confirm wait while task is pending but card not confirmed yet
-      (!!task.messages.find((m) => m.step === AgentStep.TO_SUB_TASKS && !m.isConfirm) &&
-        task.status === ChatTaskStatus.PENDING);
+      (task.status === 'running' && task.hasMessages) ||
+      task.status === 'pause' ||
+      // Only block when task is actively being controlled
+      task.isTakeControl;
+      // Removed: splitting phase and skeleton/computing phase checks
+      // to allow input during task decomposition
     const isReplayChatStore = task?.type === 'replay';
     if (!requiresHumanReply && isTaskBusy && !isReplayChatStore) {
       toast.error(
@@ -863,17 +858,8 @@ export default function ChatBox(): JSX.Element {
       (m) => m.step === AgentStep.TO_SUB_TASKS && !m.isConfirm
     );
 
-    // Determine if we're in the "splitting in progress" phase (skeleton visible)
-    // Only show splitting if there's NO to_sub_tasks message yet (not even confirmed)
-    const isSkeletonPhase =
-      (task.status !== ChatTaskStatus.FINISHED &&
-        !anyToSubTasksMessage &&
-        !task.hasWaitComfirm &&
-        task.messages.length > 0) ||
-      (task.isTakeControl && !anyToSubTasksMessage);
-    if (isSkeletonPhase) {
-      return 'splitting';
-    }
+    // Skip splitting phase UI - don't lock the chatbox until tasks are ready to execute
+    // The skeleton/splitting phases are now hidden, so we go directly to confirm or input state
 
     // After splitting completes and TaskCard is awaiting user confirmation,
     // the Task becomes 'pending' and we show the confirm state.
@@ -885,9 +871,9 @@ export default function ChatBox(): JSX.Element {
       return 'confirm';
     }
 
-    // If subtasks exist but not yet confirmed while task is still running, keep showing splitting
+    // If subtasks exist but not yet confirmed while task is still running, show confirm instead of splitting
     if (toSubTasksMessage && !toSubTasksMessage.isConfirm) {
-      return 'splitting';
+      return 'confirm';
     }
 
     // Check task status
@@ -958,12 +944,82 @@ export default function ChatBox(): JSX.Element {
       console.error(`Can't remove ${task_id} due to ${error}`);
     }
   };
+  const getAllChatStoresMemoized = useMemo(() => {
+    const project_id = projectStore.activeProjectId;
+    if (!project_id) return [];
 
-  // getAllChatStoresMemoized, hasAnyMessages, isTaskBusy, and isInputDisabled
-  // are defined before early return
+    return projectStore.getAllChatStores(project_id);
+  }, [projectStore, projectStore.activeProjectId, chatStore]);
+
+  // Check if any chat store in the project has messages
+  const hasAnyMessages = useMemo(() => {
+    // First check current active chat store
+    if (chatStore.activeTaskId && chatStore.tasks[chatStore.activeTaskId]) {
+      const activeTask = chatStore.tasks[chatStore.activeTaskId];
+      if (
+        (activeTask.messages && activeTask.messages.length > 0) ||
+        activeTask.hasMessages
+      ) {
+        return true;
+      }
+    }
+
+    // Then check all other chat stores in the project
+    return getAllChatStoresMemoized.some(({ chatStore: store }) => {
+      const state = store.getState();
+      return (
+        state.activeTaskId &&
+        state.tasks[state.activeTaskId] &&
+        (state.tasks[state.activeTaskId].messages.length > 0 ||
+          state.tasks[state.activeTaskId].hasMessages)
+      );
+    });
+  }, [chatStore, getAllChatStoresMemoized]);
+
+  const isTaskBusy = useMemo(() => {
+    if (!chatStore.activeTaskId || !chatStore.tasks[chatStore.activeTaskId])
+      return false;
+    const task = chatStore.tasks[chatStore.activeTaskId];
+    return (
+      // running or paused
+      task.status === 'running' ||
+      task.status === 'pause' ||
+      // Only block when task is actively being controlled
+      task.isTakeControl
+      // Removed: splitting phase and skeleton/computing phase checks
+      // to allow input during task decomposition
+    );
+  }, [chatStore.activeTaskId, chatStore.tasks]);
+
+  const isInputDisabled = useMemo(() => {
+    if (!chatStore.activeTaskId || !chatStore.tasks[chatStore.activeTaskId])
+      return true;
+
+    const task = chatStore.tasks[chatStore.activeTaskId];
+
+    // If ask human is active, allow input
+    if (task.activeAsk) return false;
+
+    if (isTaskBusy) return true;
+
+    // Standard checks - check model first, then privacy
+    if (!hasModel) return true;
+    if (!privacy) return true;
+    if (useCloudModelInDev) return true;
+    if (task.isContextExceeded) return true;
+
+    return false;
+  }, [
+    chatStore.activeTaskId,
+    chatStore.tasks,
+    privacy,
+    hasModel,
+    useCloudModelInDev,
+    isTaskBusy,
+  ]);
 
   return (
-    <div className="h-full w-full flex-none items-center justify-center">
+    <div className="w-full h-full flex-none items-center justify-center">
       {hasAnyMessages ? (
         <div className="flex h-full w-full flex-1 flex-col">
           {/* New Project Chat Container */}

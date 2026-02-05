@@ -435,13 +435,14 @@ export const UserQueryGroup: React.FC<UserQueryGroupProps> = ({
         return null;
       })}
 
-      {/* Streaming Decompose Text - rendered separately to avoid flickering */}
-      {isLastUserQuery && streamingDecomposeText && (
+      {/* Streaming Decompose Text - only show when we have actual streaming content and task will be ready to execute */}
+      {/* Hidden during initial splitting phase - will only render when meaningful decompose text is received */}
+      {/* {isLastUserQuery && streamingDecomposeText && (
         <StreamingTaskList streamingText={streamingDecomposeText} />
-      )}
+      )} */}
 
-      {/* Skeleton for loading state */}
-      {isSkeletonPhase && (
+      {/* Skeleton for loading state - hidden until task is ready to execute */}
+      {/* {isSkeletonPhase && (
         <motion.div
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -449,7 +450,7 @@ export const UserQueryGroup: React.FC<UserQueryGroupProps> = ({
         >
           <TypeCardSkeleton isTakeControl={task?.isTakeControl || false} />
         </motion.div>
-      )}
+      )} */}
     </motion.div>
   );
 };
