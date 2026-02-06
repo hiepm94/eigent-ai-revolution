@@ -13,6 +13,7 @@
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import { Button } from '@/components/ui/button';
+import { ChatTaskStatusType } from '@/types/constants';
 import { useTranslation } from 'react-i18next';
 
 interface BoxActionProps {
@@ -27,7 +28,7 @@ interface BoxActionProps {
   /** Optional right-side content to replace replay */
   rightContent?: React.ReactNode;
   /** Task status for determining what button to show */
-  status?: 'running' | 'finished' | 'pending' | 'pause';
+  status?: ChatTaskStatusType;
   /** Task time display */
   taskTime?: string;
   /** Callback for pause/resume */

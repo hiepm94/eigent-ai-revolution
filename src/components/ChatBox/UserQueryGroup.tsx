@@ -13,6 +13,7 @@
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
 import { VanillaChatStore } from '@/store/chatStore';
+import { AgentStep, ChatTaskStatus } from '@/types/constants';
 import { motion } from 'framer-motion';
 import { FileText } from 'lucide-react';
 import React, {
@@ -23,11 +24,9 @@ import React, {
 } from 'react';
 import { AgentMessageCard } from './MessageItem/AgentMessageCard';
 import { NoticeCard } from './MessageItem/NoticeCard';
+import { PlanDraftCard } from './MessageItem/PlanDraftCard';
 import { UserMessageCard } from './MessageItem/UserMessageCard';
-import { StreamingTaskList } from './TaskBox/StreamingTaskList';
 import { TaskCard } from './TaskBox/TaskCard';
-import { TypeCardSkeleton } from './TaskBox/TypeCardSkeleton';
-import { AgentStep, ChatTaskStatus } from '@/types/constants';
 
 interface QueryGroup {
   queryId: string;
@@ -87,7 +86,9 @@ export const UserQueryGroup: React.FC<UserQueryGroupProps> = ({
         if (userMessageIndex > 0) {
           // Check the previous message - if it's an agent message with step 'ask', this is a human-reply
           const prevMessage = messages[userMessageIndex - 1];
-          return prevMessage?.role === 'agent' && prevMessage?.step === AgentStep.ASK;
+          return (
+            prevMessage?.role === 'agent' && prevMessage?.step === AgentStep.ASK
+          );
         }
         return false;
       })());
@@ -282,6 +283,36 @@ export const UserQueryGroup: React.FC<UserQueryGroupProps> = ({
 
       {/* Other Messages */}
       {queryGroup.otherMessages.map((message) => {
+        // Handle Plan Draft messages
+        if (message.step === AgentStep.PLAN_DRAFT && message.planDraft) {
+          return (
+            <motion.div
+              key={`plan-draft-${message.id}`}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: 0.2 }}
+              className="flex flex-col gap-4 pl-3"
+            >
+              <PlanDraftCard
+                planDraft={message.planDraft}
+                isReadyToStart={task?.isReadyToStart || false}
+                onStartTask={() => {
+                  if (chatState.startExecution && activeTaskId) {
+                    chatState.startExecution(activeTaskId);
+                  }
+                }}
+                onEditPlan={() => {
+                  chatState.setActiveWorkSpace(
+                    activeTaskId as string,
+                    'planning'
+                  );
+                }}
+                disabled={task?.status === 'running'}
+              />
+            </motion.div>
+          );
+        }
+
         if (message.content.length > 0) {
           if (message.step === AgentStep.END) {
             return (

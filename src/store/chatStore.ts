@@ -41,6 +41,63 @@ import { createStore } from 'zustand';
 import { getAuthStore, getWorkerList } from './authStore';
 import { useProjectStore } from './projectStore';
 
+// Workflow types for interactive flow
+export interface RequirementItem {
+  id: string;
+  type:
+    | 'mcp_server'
+    | 'api_key'
+    | 'file_access'
+    | 'browser'
+    | 'terminal'
+    | 'tool'
+    | 'other';
+  name: string;
+  description: string;
+  required: boolean;
+  reason?: string;
+  how_to_provide?: string;
+  status: 'missing' | 'provided' | 'validated' | 'failed';
+  value?: string;
+  validation_error?: string;
+}
+
+export interface ScheduleSuggestion {
+  detected: boolean;
+  cron?: string;
+  timezone?: string;
+  description?: string;
+  run_at?: string;
+  is_recurring: boolean;
+}
+
+export interface WorkflowState {
+  phase: 'understanding' | 'execution' | 'completed' | 'failed' | 'cancelled';
+  step?: 'step1' | 'step2' | 'step3';
+  status_message?: string;
+  requirements: RequirementItem[];
+  validation_results: Record<string, boolean>;
+  schedule_suggestion?: ScheduleSuggestion;
+  is_ready_to_start: boolean;
+}
+
+export interface PlanTask {
+  id: string;
+  content: string;
+  agent_type?: string;
+  dependencies: string[];
+  estimated_time?: string;
+  tools_needed: string[];
+  status: 'pending' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+}
+
+export interface PlanDraft {
+  tasks: PlanTask[];
+  summary?: string;
+  total_estimated_time?: string;
+  can_start: boolean;
+}
+
 interface Task {
   messages: Message[];
   type: string;
@@ -75,6 +132,12 @@ interface Task {
   isContextExceeded?: boolean;
   // Streaming decompose text - stored separately to avoid frequent re-renders
   streamingDecomposeText: string;
+  // New workflow phase fields
+  workflowState: WorkflowState | null;
+  planDraft: PlanDraft | null;
+  scheduleSuggestion: ScheduleSuggestion | null;
+  isReadyToStart: boolean;
+  analysisProgress: string;
 }
 
 export interface ChatStore {
@@ -168,6 +231,25 @@ export interface ChatStore {
   setNextTaskId: (taskId: string | null) => void;
   setStreamingDecomposeText: (taskId: string, text: string) => void;
   clearStreamingDecomposeText: (taskId: string) => void;
+  setWorkflowState: (taskId: string, state: WorkflowState | null) => void;
+  setPlanDraft: (taskId: string, plan: PlanDraft | null) => void;
+  setScheduleSuggestion: (
+    taskId: string,
+    schedule: ScheduleSuggestion | null
+  ) => void;
+  setIsReadyToStart: (taskId: string, isReady: boolean) => void;
+  setAnalysisProgress: (taskId: string, progress: string) => void;
+  updateRequirement: (
+    taskId: string,
+    requirementId: string,
+    value: string
+  ) => void;
+  updatePlanTask: (
+    taskId: string,
+    planTaskId: string,
+    updates: Partial<PlanTask>
+  ) => void;
+  startExecution: (taskId: string) => Promise<void>;
 }
 
 export type VanillaChatStore = {
@@ -271,6 +353,11 @@ const chatStore = (initial?: Partial<ChatStore>) =>
             isTakeControl: false,
             isTaskEdit: false,
             streamingDecomposeText: '',
+            workflowState: null,
+            planDraft: null,
+            scheduleSuggestion: null,
+            isReadyToStart: false,
+            analysisProgress: '',
           },
         },
       }));
@@ -952,6 +1039,125 @@ const chatStore = (initial?: Partial<ChatStore>) =>
 
           currentTaskId = getCurrentTaskId();
           // if (tasks[currentTaskId].status === ChatTaskStatus.FINISHED) return
+
+          // Handle workflow state updates
+          if (agentMessages.step === AgentStep.WORKFLOW_STATE) {
+            const workflowState = agentMessages.data as WorkflowState;
+            getCurrentChatStore().setWorkflowState(
+              currentTaskId,
+              workflowState
+            );
+
+            // Update chat status based on workflow phase/step
+            if (workflowState.phase === 'understanding') {
+              if (workflowState.step === 'step1') {
+                setStatus(currentTaskId, ChatTaskStatus.ANALYZING);
+              } else if (workflowState.step === 'step2') {
+                setStatus(currentTaskId, ChatTaskStatus.COLLECTING);
+              } else if (workflowState.step === 'step3') {
+                setStatus(currentTaskId, ChatTaskStatus.PLANNING);
+              }
+            }
+
+            if (workflowState.is_ready_to_start) {
+              setStatus(currentTaskId, ChatTaskStatus.READY);
+              getCurrentChatStore().setIsReadyToStart(currentTaskId, true);
+            }
+            return;
+          }
+
+          // Handle analyzing progress
+          if (agentMessages.step === AgentStep.ANALYZING) {
+            const { status, message } = agentMessages.data;
+            getCurrentChatStore().setAnalysisProgress(
+              currentTaskId,
+              message || ''
+            );
+            if (status === 'in_progress') {
+              setStatus(currentTaskId, ChatTaskStatus.ANALYZING);
+            }
+            return;
+          }
+
+          // Handle validating progress
+          if (agentMessages.step === AgentStep.VALIDATING) {
+            const { status, message } = agentMessages.data;
+            getCurrentChatStore().setAnalysisProgress(
+              currentTaskId,
+              message || ''
+            );
+            if (status === 'in_progress') {
+              setStatus(currentTaskId, ChatTaskStatus.COLLECTING);
+            }
+            return;
+          }
+
+          // Handle requirements list
+          if (agentMessages.step === AgentStep.REQUIREMENTS) {
+            const { requirements } = agentMessages.data;
+            const currentState =
+              getCurrentChatStore().tasks[currentTaskId]?.workflowState;
+            if (currentState) {
+              getCurrentChatStore().setWorkflowState(currentTaskId, {
+                ...currentState,
+                requirements: requirements || [],
+              });
+            }
+            return;
+          }
+
+          // Handle requirements validation results
+          if (agentMessages.step === AgentStep.REQUIREMENTS_VALIDATION) {
+            const { results, all_valid } = agentMessages.data;
+            const currentState =
+              getCurrentChatStore().tasks[currentTaskId]?.workflowState;
+            if (currentState) {
+              getCurrentChatStore().setWorkflowState(currentTaskId, {
+                ...currentState,
+                validation_results: results || {},
+              });
+            }
+            return;
+          }
+
+          // Handle requirements ready (all validated)
+          if (agentMessages.step === AgentStep.REQUIREMENTS_READY) {
+            setStatus(currentTaskId, ChatTaskStatus.PLANNING);
+            return;
+          }
+
+          // Handle plan draft
+          if (agentMessages.step === AgentStep.PLAN_DRAFT) {
+            const planDraft = agentMessages.data as PlanDraft;
+            getCurrentChatStore().setPlanDraft(currentTaskId, planDraft);
+
+            if (planDraft.can_start) {
+              getCurrentChatStore().setIsReadyToStart(currentTaskId, true);
+              setStatus(currentTaskId, ChatTaskStatus.READY);
+            }
+
+            // Add a message to show the plan in the chat
+            const planMessage: Message = {
+              id: generateUniqueId(),
+              role: 'agent',
+              content: '',
+              step: AgentStep.PLAN_DRAFT,
+              planDraft: planDraft,
+            };
+            addMessages(currentTaskId, planMessage);
+            return;
+          }
+
+          // Handle schedule suggestion
+          if (agentMessages.step === AgentStep.SCHEDULE_SUGGESTION) {
+            const scheduleSuggestion = agentMessages.data as ScheduleSuggestion;
+            getCurrentChatStore().setScheduleSuggestion(
+              currentTaskId,
+              scheduleSuggestion
+            );
+            return;
+          }
+
           if (agentMessages.step === AgentStep.DECOMPOSE_TEXT) {
             const { content } = agentMessages.data;
             const text = content;
@@ -1398,7 +1604,9 @@ const chatStore = (initial?: Partial<ChatStore>) =>
                   setTaskAssigning(currentTaskId, [...taskAssigning]);
                 }
               }
-              const taskIndex = taskRunning.findIndex((task) => task.id === process_task_id);
+              const taskIndex = taskRunning.findIndex(
+                (task) => task.id === process_task_id
+              );
               if (taskIndex !== -1 && taskRunning[taskIndex].agent) {
                 taskRunning[taskIndex].agent!.status = 'completed';
               }
@@ -1914,6 +2122,8 @@ const chatStore = (initial?: Partial<ChatStore>) =>
               // Complete the current task with error status
               setStatus(currentTaskId, ChatTaskStatus.FINISHED);
               setIsPending(currentTaskId, false);
+              // Enable input after error so user can continue chatting
+              setHasWaitComfirm(currentTaskId, true);
 
               // Add error message to the current task
               addMessages(currentTaskId, {
@@ -3146,6 +3356,147 @@ const chatStore = (initial?: Partial<ChatStore>) =>
           },
         };
       });
+    },
+    setWorkflowState: (taskId, state) => {
+      set((s) => {
+        if (!s.tasks[taskId]) return s;
+        return {
+          ...s,
+          tasks: {
+            ...s.tasks,
+            [taskId]: {
+              ...s.tasks[taskId],
+              workflowState: state,
+            },
+          },
+        };
+      });
+    },
+    setPlanDraft: (taskId, plan) => {
+      set((state) => {
+        if (!state.tasks[taskId]) return state;
+        return {
+          ...state,
+          tasks: {
+            ...state.tasks,
+            [taskId]: {
+              ...state.tasks[taskId],
+              planDraft: plan,
+            },
+          },
+        };
+      });
+    },
+    setScheduleSuggestion: (taskId, schedule) => {
+      set((state) => {
+        if (!state.tasks[taskId]) return state;
+        return {
+          ...state,
+          tasks: {
+            ...state.tasks,
+            [taskId]: {
+              ...state.tasks[taskId],
+              scheduleSuggestion: schedule,
+            },
+          },
+        };
+      });
+    },
+    setIsReadyToStart: (taskId, isReady) => {
+      set((state) => {
+        if (!state.tasks[taskId]) return state;
+        return {
+          ...state,
+          tasks: {
+            ...state.tasks,
+            [taskId]: {
+              ...state.tasks[taskId],
+              isReadyToStart: isReady,
+            },
+          },
+        };
+      });
+    },
+    setAnalysisProgress: (taskId, progress) => {
+      set((state) => {
+        if (!state.tasks[taskId]) return state;
+        return {
+          ...state,
+          tasks: {
+            ...state.tasks,
+            [taskId]: {
+              ...state.tasks[taskId],
+              analysisProgress: progress,
+            },
+          },
+        };
+      });
+    },
+    updateRequirement: (taskId, requirementId, value) => {
+      set((state) => {
+        if (!state.tasks[taskId]) return state;
+        const workflowState = state.tasks[taskId].workflowState;
+        if (!workflowState) return state;
+        const updatedRequirements = workflowState.requirements.map((req) =>
+          req.id === requirementId
+            ? { ...req, value, status: 'provided' as const }
+            : req
+        );
+        return {
+          ...state,
+          tasks: {
+            ...state.tasks,
+            [taskId]: {
+              ...state.tasks[taskId],
+              workflowState: {
+                ...workflowState,
+                requirements: updatedRequirements,
+              },
+            },
+          },
+        };
+      });
+    },
+    updatePlanTask: (taskId, planTaskId, updates) => {
+      set((state) => {
+        if (!state.tasks[taskId]) return state;
+        const planDraft = state.tasks[taskId].planDraft;
+        if (!planDraft) return state;
+        const updatedTasks = planDraft.tasks.map((task) =>
+          task.id === planTaskId ? { ...task, ...updates } : task
+        );
+        return {
+          ...state,
+          tasks: {
+            ...state.tasks,
+            [taskId]: {
+              ...state.tasks[taskId],
+              planDraft: {
+                ...planDraft,
+                tasks: updatedTasks,
+              },
+            },
+          },
+        };
+      });
+    },
+    startExecution: async (taskId) => {
+      const { tasks, setWorkflowState } = get();
+      if (!tasks[taskId]) return;
+      const workflowState = tasks[taskId].workflowState;
+      if (workflowState) {
+        setWorkflowState(taskId, {
+          ...workflowState,
+          phase: 'execution',
+        });
+      }
+      // Get projectId from projectStore and call the API
+      const projectStore = useProjectStore.getState();
+      const projectId = projectStore.activeProjectId;
+      if (projectId) {
+        const { startExecution } = await import('@/api/workflow');
+        await startExecution(projectId);
+      }
     },
   }));
 

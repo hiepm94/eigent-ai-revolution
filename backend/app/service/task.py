@@ -70,11 +70,38 @@ class Action(str, Enum):
     skip_task = "skip_task"  # user -> backend
     timeout = "timeout"  # backend -> user (task timeout error)
     # Requirements gathering phase (new flow)
-    requirements = "requirements"  # backend -> user (list of required tools/resources)
-    requirements_validation = "requirements_validation"  # backend -> user (validation results)
-    requirements_ready = "requirements_ready"  # backend -> user (all requirements validated)
-    provide_requirements = "provide_requirements"  # user -> backend (user provides requirements)
-    confirm_requirements = "confirm_requirements"  # user -> backend (user confirms to proceed)
+    requirements = (
+        "requirements"  # backend -> user (list of required tools/resources)
+    )
+    requirements_validation = (
+        "requirements_validation"  # backend -> user (validation results)
+    )
+    requirements_ready = (
+        "requirements_ready"  # backend -> user (all requirements validated)
+    )
+    provide_requirements = (
+        "provide_requirements"  # user -> backend (user provides requirements)
+    )
+    confirm_requirements = (
+        "confirm_requirements"  # user -> backend (user confirms to proceed)
+    )
+    # Interactive workflow phase actions
+    workflow_state = (
+        "workflow_state"  # backend -> user (current phase/step status)
+    )
+    plan_draft = "plan_draft"  # backend -> user (task plan for editing)
+    schedule_suggestion = (
+        "schedule_suggestion"  # backend -> user (detected schedule)
+    )
+    update_plan = "update_plan"  # user -> backend (plan modifications)
+    start_execution = "start_execution"  # user -> backend (user clicks start after plan approval)
+    analyzing = (
+        "analyzing"  # backend -> user (step 1 - auto analysis in progress)
+    )
+    collecting = (
+        "collecting"  # backend -> user (step 2 - collecting requirements)
+    )
+    planning = "planning"  # backend -> user (step 3 - plan ready for editing)
 
 
 class ActionImproveData(BaseModel):
@@ -294,7 +321,9 @@ class ActionRequirementsData(BaseModel):
 
 
 class ActionRequirementsValidationData(BaseModel):
-    action: Literal[Action.requirements_validation] = Action.requirements_validation
+    action: Literal[Action.requirements_validation] = (
+        Action.requirements_validation
+    )
     data: dict
 
 
@@ -310,6 +339,15 @@ class ActionProvideRequirementsData(BaseModel):
 
 class ActionConfirmRequirementsData(BaseModel):
     action: Literal[Action.confirm_requirements] = Action.confirm_requirements
+
+
+class ActionUpdatePlanData(BaseModel):
+    action: Literal[Action.update_plan] = Action.update_plan
+    data: dict
+
+
+class ActionStartExecutionData(BaseModel):
+    action: Literal[Action.start_execution] = Action.start_execution
 
 
 ActionData = (
@@ -346,6 +384,8 @@ ActionData = (
     | ActionRequirementsReadyData
     | ActionProvideRequirementsData
     | ActionConfirmRequirementsData
+    | ActionUpdatePlanData
+    | ActionStartExecutionData
 )
 
 

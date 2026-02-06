@@ -23,6 +23,7 @@ import {
 import useChatStoreAdapter from '@/hooks/useChatStoreAdapter';
 import { generateUniqueId, replayActiveTask } from '@/lib';
 import { useAuthStore } from '@/store/authStore';
+import { AgentStep, ChatTaskStatus } from '@/types/constants';
 import { Square, SquareCheckBig, TriangleAlert } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -30,7 +31,6 @@ import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import BottomBox from './BottomBox';
 import { ProjectChatContainer } from './ProjectChatContainer';
-import { AgentStep, ChatTaskStatus } from '@/types/constants';
 
 export default function ChatBox(): JSX.Element {
   const [message, setMessage] = useState<string>('');
@@ -257,7 +257,9 @@ export default function ChatBox(): JSX.Element {
       task.status === ChatTaskStatus.RUNNING ||
       task.status === ChatTaskStatus.PAUSE ||
       // splitting phase
-      task.messages.some((m) => m.step === AgentStep.TO_SUB_TASKS && !m.isConfirm) ||
+      task.messages.some(
+        (m) => m.step === AgentStep.TO_SUB_TASKS && !m.isConfirm
+      ) ||
       // skeleton/computing phase
       (!task.messages.find((m) => m.step === AgentStep.TO_SUB_TASKS) &&
         !task.hasWaitComfirm &&
@@ -274,6 +276,21 @@ export default function ChatBox(): JSX.Element {
 
     // If ask human is active, allow input
     if (task.activeAsk) return false;
+
+    // NEW: Allow input during planning phases (Phase 1) for interactive modifications
+    const planningPhases: string[] = [
+      ChatTaskStatus.ANALYZING,
+      ChatTaskStatus.COLLECTING,
+      ChatTaskStatus.PLANNING,
+      ChatTaskStatus.READY,
+    ];
+    if (planningPhases.includes(task.status as string)) {
+      // During planning phases, only check basic requirements
+      if (!hasModel) return true;
+      if (!privacy) return true;
+      if (useCloudModelInDev) return true;
+      return false; // Allow input during planning
+    }
 
     if (isTaskBusy) return true;
 
@@ -429,8 +446,8 @@ export default function ChatBox(): JSX.Element {
       task.status === 'pause' ||
       // Only block when task is actively being controlled
       task.isTakeControl;
-      // Removed: splitting phase and skeleton/computing phase checks
-      // to allow input during task decomposition
+    // Removed: splitting phase and skeleton/computing phase checks
+    // to allow input during task decomposition
     const isReplayChatStore = task?.type === 'replay';
     if (!requiresHumanReply && isTaskBusy && !isReplayChatStore) {
       toast.error(
@@ -496,15 +513,29 @@ export default function ChatBox(): JSX.Element {
             (m) => m.step === AgentStep.END // Natural completion has an "end" step message
           );
 
+        // Check if we're in interactive workflow phases
+        const interactiveWorkflowPhases: string[] = [
+          ChatTaskStatus.ANALYZING,
+          ChatTaskStatus.COLLECTING,
+          ChatTaskStatus.PLANNING,
+          ChatTaskStatus.READY,
+        ];
+        const isInInteractiveWorkflow = interactiveWorkflowPhases.includes(
+          chatStore.tasks[_taskId as string].status as string
+        );
+
         // Continue conversation if:
         // 1. Has wait confirm (simple query response) - but not if task was stopped
         // 2. Task is naturally finished (complex task completed) - but not if task was stopped
         // 3. Has any messages but pending (ongoing conversation)
+        // 4. NEW: In interactive workflow phases (ANALYZING, COLLECTING, PLANNING, READY)
         const shouldContinueConversation =
           (hasWaitComfirm && !wasTaskStopped) ||
           (isFinished && !wasTaskStopped) ||
           (hasMessages &&
-            chatStore.tasks[_taskId as string].status === ChatTaskStatus.PENDING);
+            chatStore.tasks[_taskId as string].status ===
+              ChatTaskStatus.PENDING) ||
+          isInInteractiveWorkflow;
 
         if (shouldContinueConversation) {
           // Check if this is the very first message and task hasn't started
@@ -523,7 +554,8 @@ export default function ChatBox(): JSX.Element {
           // Only start a new task if: pending, no messages processed yet
           // OR while or after replaying a project
           if (
-            (chatStore.tasks[_taskId as string].status === ChatTaskStatus.PENDING &&
+            (chatStore.tasks[_taskId as string].status ===
+              ChatTaskStatus.PENDING &&
               !hasSimpleResponse &&
               !hasComplexTask &&
               !isFinished) ||
@@ -850,6 +882,20 @@ export default function ChatBox(): JSX.Element {
 
     // Queued messages no longer change BottomBox state; QueuedBox renders independently
 
+    // NEW: Handle workflow phase states - keep chatbox enabled during planning
+    if (task.status === ChatTaskStatus.ANALYZING) {
+      return 'analyzing'; // Phase 1 Step 1 - show progress, input enabled
+    }
+    if (task.status === ChatTaskStatus.COLLECTING) {
+      return 'collecting'; // Phase 1 Step 2 - show requirements, input enabled
+    }
+    if (task.status === ChatTaskStatus.PLANNING) {
+      return 'planning'; // Phase 1 Step 3 - show plan, input enabled for modifications
+    }
+    if (task.status === ChatTaskStatus.READY) {
+      return 'ready'; // Plan approved, waiting for "Start Task" click
+    }
+
     // Check for any to_sub_tasks message (confirmed or not)
     const anyToSubTasksMessage = task.messages.find(
       (m) => m.step === AgentStep.TO_SUB_TASKS
@@ -877,7 +923,10 @@ export default function ChatBox(): JSX.Element {
     }
 
     // Check task status
-    if (task.status === ChatTaskStatus.RUNNING || task.status === ChatTaskStatus.PAUSE) {
+    if (
+      task.status === ChatTaskStatus.RUNNING ||
+      task.status === ChatTaskStatus.PAUSE
+    ) {
       return 'running';
     }
 
@@ -925,7 +974,11 @@ export default function ChatBox(): JSX.Element {
       // Note: Replay creates a new chatstore, so no conflicts
       const task = chatStore.tasks[chatStore.activeTaskId as string];
       // Only skip backend call if task is finished or hasn't started yet (no messages)
-      if (task && task.messages.length > 0 && task.status !== ChatTaskStatus.FINISHED) {
+      if (
+        task &&
+        task.messages.length > 0 &&
+        task.status !== ChatTaskStatus.FINISHED
+      ) {
         try {
           await fetchDelete(`/chat/${project_id}/remove-task/${task_id}`, {
             project_id: project_id,
@@ -944,82 +997,9 @@ export default function ChatBox(): JSX.Element {
       console.error(`Can't remove ${task_id} due to ${error}`);
     }
   };
-  const getAllChatStoresMemoized = useMemo(() => {
-    const project_id = projectStore.activeProjectId;
-    if (!project_id) return [];
-
-    return projectStore.getAllChatStores(project_id);
-  }, [projectStore, projectStore.activeProjectId, chatStore]);
-
-  // Check if any chat store in the project has messages
-  const hasAnyMessages = useMemo(() => {
-    // First check current active chat store
-    if (chatStore.activeTaskId && chatStore.tasks[chatStore.activeTaskId]) {
-      const activeTask = chatStore.tasks[chatStore.activeTaskId];
-      if (
-        (activeTask.messages && activeTask.messages.length > 0) ||
-        activeTask.hasMessages
-      ) {
-        return true;
-      }
-    }
-
-    // Then check all other chat stores in the project
-    return getAllChatStoresMemoized.some(({ chatStore: store }) => {
-      const state = store.getState();
-      return (
-        state.activeTaskId &&
-        state.tasks[state.activeTaskId] &&
-        (state.tasks[state.activeTaskId].messages.length > 0 ||
-          state.tasks[state.activeTaskId].hasMessages)
-      );
-    });
-  }, [chatStore, getAllChatStoresMemoized]);
-
-  const isTaskBusy = useMemo(() => {
-    if (!chatStore.activeTaskId || !chatStore.tasks[chatStore.activeTaskId])
-      return false;
-    const task = chatStore.tasks[chatStore.activeTaskId];
-    return (
-      // running or paused
-      task.status === 'running' ||
-      task.status === 'pause' ||
-      // Only block when task is actively being controlled
-      task.isTakeControl
-      // Removed: splitting phase and skeleton/computing phase checks
-      // to allow input during task decomposition
-    );
-  }, [chatStore.activeTaskId, chatStore.tasks]);
-
-  const isInputDisabled = useMemo(() => {
-    if (!chatStore.activeTaskId || !chatStore.tasks[chatStore.activeTaskId])
-      return true;
-
-    const task = chatStore.tasks[chatStore.activeTaskId];
-
-    // If ask human is active, allow input
-    if (task.activeAsk) return false;
-
-    if (isTaskBusy) return true;
-
-    // Standard checks - check model first, then privacy
-    if (!hasModel) return true;
-    if (!privacy) return true;
-    if (useCloudModelInDev) return true;
-    if (task.isContextExceeded) return true;
-
-    return false;
-  }, [
-    chatStore.activeTaskId,
-    chatStore.tasks,
-    privacy,
-    hasModel,
-    useCloudModelInDev,
-    isTaskBusy,
-  ]);
 
   return (
-    <div className="w-full h-full flex-none items-center justify-center">
+    <div className="h-full w-full flex-none items-center justify-center">
       {hasAnyMessages ? (
         <div className="flex h-full w-full flex-1 flex-col">
           {/* New Project Chat Container */}
@@ -1067,7 +1047,8 @@ export default function ChatBox(): JSX.Element {
               taskStatus={chatStore.tasks[chatStore.activeTaskId]?.status}
               onReplay={handleReplay}
               replayDisabled={
-                chatStore.tasks[chatStore.activeTaskId]?.status !== ChatTaskStatus.FINISHED
+                chatStore.tasks[chatStore.activeTaskId]?.status !==
+                ChatTaskStatus.FINISHED
               }
               replayLoading={isReplayLoading}
               onPauseResume={handlePauseResume}

@@ -12,7 +12,13 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
-import type { AgentStepType, AgentMessageStatusType, TaskStatusType, ChatTaskStatusType, AgentStatusType } from './constants';
+import type { PlanDraft, RequirementItem } from '@/store/chatStore';
+import type {
+  AgentMessageStatusType,
+  AgentStatusType,
+  AgentStepType,
+  TaskStatusType,
+} from './constants';
 
 // Global type definitions for ChatBox component
 
@@ -109,6 +115,7 @@ declare global {
     summary?: string;
     agent_name?: string;
     attaches?: File[];
+    planDraft?: PlanDraft;
   }
 
   interface AgentMessage {
@@ -141,6 +148,11 @@ declare global {
       current_length?: number;
       max_length?: number;
       text?: string;
+      // Workflow-related fields
+      status?: string;
+      requirements?: RequirementItem[];
+      results?: Record<string, boolean>;
+      all_valid?: boolean;
     };
     status?: AgentMessageStatusType;
   }

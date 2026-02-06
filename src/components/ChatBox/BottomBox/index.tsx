@@ -12,18 +12,22 @@
 // limitations under the License.
 // ========= Copyright 2025-2026 @ Eigent.ai All Rights Reserved. =========
 
+import { type ChatTaskStatusType } from '@/types/constants';
 import { BoxAction } from './BoxAction';
 import { BoxHeaderConfirm, BoxHeaderSplitting } from './BoxHeader';
 import { FileAttachment, Inputbox, InputboxProps } from './InputBox';
 import { QueuedBox, QueuedMessage } from './QueuedBox';
-import { type ChatTaskStatusType } from "@/types/constants";
 
 export type BottomBoxState =
   | 'input'
   | 'splitting'
   | 'confirm'
   | 'running'
-  | 'finished';
+  | 'finished'
+  | 'analyzing' // Phase 1 Step 1 - auto analysis
+  | 'collecting' // Phase 1 Step 2 - collecting requirements
+  | 'planning' // Phase 1 Step 3 - plan editing
+  | 'ready'; // Plan approved, waiting for start
 
 interface BottomBoxProps {
   // General state

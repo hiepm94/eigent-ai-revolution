@@ -16,32 +16,40 @@
  * SSE step values received from the backend in AgentMessage.step.
  */
 export const AgentStep = {
-	CONFIRMED: 'confirmed',
-	NEW_TASK_STATE: 'new_task_state',
-	END: 'end',
-	WAIT_CONFIRM: 'wait_confirm',
-	DECOMPOSE_TEXT: 'decompose_text',
-	TO_SUB_TASKS: 'to_sub_tasks',
-	CREATE_AGENT: 'create_agent',
-	TASK_STATE: 'task_state',
-	ACTIVATE_AGENT: 'activate_agent',
-	DEACTIVATE_AGENT: 'deactivate_agent',
-	ASSIGN_TASK: 'assign_task',
-	ACTIVATE_TOOLKIT: 'activate_toolkit',
-	DEACTIVATE_TOOLKIT: 'deactivate_toolkit',
-	TERMINAL: 'terminal',
-	WRITE_FILE: 'write_file',
-	BUDGET_NOT_ENOUGH: 'budget_not_enough',
-	CONTEXT_TOO_LONG: 'context_too_long',
-	ERROR: 'error',
-	ADD_TASK: 'add_task',
-	REMOVE_TASK: 'remove_task',
-	NOTICE: 'notice',
-	ASK: 'ask',
-	SYNC: 'sync',
-	NOTICE_CARD: 'notice_card',
-	FAILED: 'failed',
-	AGENT_SUMMARY_END: 'agent_summary_end',
+  CONFIRMED: 'confirmed',
+  NEW_TASK_STATE: 'new_task_state',
+  END: 'end',
+  WAIT_CONFIRM: 'wait_confirm',
+  DECOMPOSE_TEXT: 'decompose_text',
+  TO_SUB_TASKS: 'to_sub_tasks',
+  CREATE_AGENT: 'create_agent',
+  TASK_STATE: 'task_state',
+  ACTIVATE_AGENT: 'activate_agent',
+  DEACTIVATE_AGENT: 'deactivate_agent',
+  ASSIGN_TASK: 'assign_task',
+  ACTIVATE_TOOLKIT: 'activate_toolkit',
+  DEACTIVATE_TOOLKIT: 'deactivate_toolkit',
+  TERMINAL: 'terminal',
+  WRITE_FILE: 'write_file',
+  BUDGET_NOT_ENOUGH: 'budget_not_enough',
+  CONTEXT_TOO_LONG: 'context_too_long',
+  ERROR: 'error',
+  ADD_TASK: 'add_task',
+  REMOVE_TASK: 'remove_task',
+  NOTICE: 'notice',
+  ASK: 'ask',
+  SYNC: 'sync',
+  NOTICE_CARD: 'notice_card',
+  FAILED: 'failed',
+  AGENT_SUMMARY_END: 'agent_summary_end',
+  WORKFLOW_STATE: 'workflow_state',
+  REQUIREMENTS: 'requirements',
+  REQUIREMENTS_VALIDATION: 'requirements_validation',
+  REQUIREMENTS_READY: 'requirements_ready',
+  PLAN_DRAFT: 'plan_draft',
+  SCHEDULE_SUGGESTION: 'schedule_suggestion',
+  ANALYZING: 'analyzing',
+  VALIDATING: 'validating',
 } as const;
 
 export type AgentStepType = (typeof AgentStep)[keyof typeof AgentStep];
@@ -50,24 +58,25 @@ export type AgentStepType = (typeof AgentStep)[keyof typeof AgentStep];
  * Status values on AgentMessage.status (SSE message lifecycle).
  */
 export const AgentMessageStatus = {
-	RUNNING: 'running',
-	FILLED: 'filled',
-	COMPLETED: 'completed',
+  RUNNING: 'running',
+  FILLED: 'filled',
+  COMPLETED: 'completed',
 } as const;
 
-export type AgentMessageStatusType = (typeof AgentMessageStatus)[keyof typeof AgentMessageStatus];
+export type AgentMessageStatusType =
+  (typeof AgentMessageStatus)[keyof typeof AgentMessageStatus];
 
 /**
  * Status values for TaskInfo (individual sub-task progress).
  */
 export const TaskStatus = {
-	COMPLETED: 'completed',
-	FAILED: 'failed',
-	SKIPPED: 'skipped',
-	WAITING: 'waiting',
-	RUNNING: 'running',
-	BLOCKED: 'blocked',
-	EMPTY: '',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  SKIPPED: 'skipped',
+  WAITING: 'waiting',
+  RUNNING: 'running',
+  BLOCKED: 'blocked',
+  EMPTY: '',
 } as const;
 
 export type TaskStatusType = (typeof TaskStatus)[keyof typeof TaskStatus];
@@ -76,22 +85,58 @@ export type TaskStatusType = (typeof TaskStatus)[keyof typeof TaskStatus];
  * Top-level task status in the ChatStore Task interface.
  */
 export const ChatTaskStatus = {
-	RUNNING: 'running',
-	FINISHED: 'finished',
-	PENDING: 'pending',
-	PAUSE: 'pause',
+  RUNNING: 'running',
+  FINISHED: 'finished',
+  PENDING: 'pending',
+  PAUSE: 'pause',
+  ANALYZING: 'analyzing',
+  COLLECTING: 'collecting',
+  PLANNING: 'planning',
+  READY: 'ready',
 } as const;
 
-export type ChatTaskStatusType = (typeof ChatTaskStatus)[keyof typeof ChatTaskStatus];
+export type ChatTaskStatusType =
+  (typeof ChatTaskStatus)[keyof typeof ChatTaskStatus];
 
 /**
  * Status values for individual agent lifecycle (toolkit operations, agent progress).
  */
 export const AgentStatusValue = {
-	PENDING: 'pending',
-	RUNNING: 'running',
-	COMPLETED: 'completed',
-	FAILED: 'failed',
+  PENDING: 'pending',
+  RUNNING: 'running',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
 } as const;
 
-export type AgentStatusType = (typeof AgentStatusValue)[keyof typeof AgentStatusValue];
+export type AgentStatusType =
+  (typeof AgentStatusValue)[keyof typeof AgentStatusValue];
+
+export const WorkflowPhase = {
+  UNDERSTANDING: 'understanding',
+  EXECUTION: 'execution',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  CANCELLED: 'cancelled',
+} as const;
+
+export type WorkflowPhaseType =
+  (typeof WorkflowPhase)[keyof typeof WorkflowPhase];
+
+export const UnderstandingStep = {
+  CLASSIFY_ANALYZE: 'classify_analyze',
+  COLLECT_VALIDATE: 'collect_validate',
+  PLAN_EDIT: 'plan_edit',
+} as const;
+
+export type UnderstandingStepType =
+  (typeof UnderstandingStep)[keyof typeof UnderstandingStep];
+
+export const RequirementStatus = {
+  MISSING: 'missing',
+  PROVIDED: 'provided',
+  VALIDATED: 'validated',
+  FAILED: 'failed',
+} as const;
+
+export type RequirementStatusType =
+  (typeof RequirementStatus)[keyof typeof RequirementStatus];

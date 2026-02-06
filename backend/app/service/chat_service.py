@@ -53,6 +53,20 @@ from app.service.task import (
     delete_task_lock,
     set_current_task_id,
 )
+from app.service.workflow import (
+    PlanUpdatePayload,
+    PlanUpdateType,
+    UnderstandingStep,
+    WorkflowPhase,
+)
+from app.service.workflow_handler import (
+    get_plan_draft,
+    get_workflow_state,
+    handle_phase1_step1,
+    handle_phase1_step2,
+    handle_phase1_step3,
+    handle_plan_update,
+)
 from app.utils.event_loop_utils import set_main_event_loop
 from app.utils.file_utils import get_working_directory
 from app.utils.server.sync_step import sync_step
@@ -63,6 +77,11 @@ from app.utils.toolkit.terminal_toolkit import TerminalToolkit
 from app.utils.workforce import Workforce
 
 logger = logging.getLogger("chat_service")
+
+# Feature flag for interactive workflow (Phase 1: Understanding → Execution)
+# When True, new messages go through classify → analyze → collect requirements → plan → execute
+# When False, uses the original direct classify (simple/complex) → execute flow
+USE_INTERACTIVE_WORKFLOW = True
 
 
 def format_task_context(
@@ -502,6 +521,133 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                             "current_length": total_length,
                             "max_length": 100000,
                         },
+                    )
+                    continue
+
+                # Interactive workflow: Phase 1 Step 1 - Classify and Analyze
+                if USE_INTERACTIVE_WORKFLOW:
+                    # Check if we're already in an active workflow state
+                    current_workflow_state = get_workflow_state(task_lock)
+
+                    # Handle follow-up messages during active workflow phases
+                    if (
+                        current_workflow_state
+                        and current_workflow_state.phase
+                        == WorkflowPhase.UNDERSTANDING
+                    ):
+                        if (
+                            current_workflow_state.step
+                            == UnderstandingStep.COLLECT_VALIDATE
+                        ):
+                            # User sent a follow-up during Step 2 (collecting requirements)
+                            # Treat as additional context and auto-confirm to proceed
+                            logger.info(
+                                "[INTERACTIVE-WORKFLOW] Follow-up during Step 2 - "
+                                "treating as user confirmation to proceed",
+                                extra={
+                                    "project_id": options.project_id,
+                                    "follow_up": question[:100],
+                                },
+                            )
+                            # Store the follow-up as additional context
+                            from app.service.workflow_handler import (
+                                get_original_message,
+                                store_original_message,
+                            )
+
+                            original_msg = (
+                                get_original_message(task_lock) or ""
+                            )
+                            updated_msg = f"{original_msg}\n\nAdditional context: {question}"
+                            store_original_message(task_lock, updated_msg)
+
+                            # Auto-proceed to Step 3 (plan generation)
+                            requirements = (
+                                current_workflow_state.requirements
+                                if current_workflow_state.requirements
+                                else []
+                            )
+                            schedule = (
+                                current_workflow_state.schedule_suggestion
+                            )
+
+                            if workforce is None:
+                                logger.info(
+                                    "[INTERACTIVE-WORKFLOW] Creating workforce for "
+                                    "plan generation"
+                                )
+                                (workforce, mcp) = await construct_workforce(
+                                    options
+                                )
+                                for new_agent in options.new_agents:
+                                    workforce.add_single_agent_worker(
+                                        format_agent_description(new_agent),
+                                        await new_agent_model(
+                                            new_agent, options
+                                        ),
+                                    )
+
+                            async for event in handle_phase1_step3(
+                                task_lock,
+                                options,
+                                requirements,
+                                schedule,
+                                workforce,
+                            ):
+                                yield event
+                            continue
+
+                        elif (
+                            current_workflow_state.step
+                            == UnderstandingStep.PLAN_EDIT
+                        ):
+                            # User sent feedback during Step 3 (plan editing)
+                            logger.info(
+                                "[INTERACTIVE-WORKFLOW] Follow-up during Step 3 - "
+                                "treating as plan feedback",
+                                extra={
+                                    "project_id": options.project_id,
+                                    "feedback": question[:100],
+                                },
+                            )
+                            # Update the plan based on feedback
+                            update_payload = PlanUpdatePayload(
+                                update_type=PlanUpdateType.REJECT,
+                                feedback=question,
+                            )
+                            async for event in handle_plan_update(
+                                task_lock, update_payload
+                            ):
+                                yield event
+                            continue
+
+                    logger.info(
+                        "[INTERACTIVE-WORKFLOW] Starting Phase 1 Step 1: "
+                        "Classify and Analyze",
+                        extra={"project_id": options.project_id},
+                    )
+                    # Pass options directly - it contains model_platform,
+                    # model_type, api_key, api_url attributes
+                    async for event in handle_phase1_step1(
+                        task_lock, options, question, options
+                    ):
+                        yield event
+
+                    workflow_state = get_workflow_state(task_lock)
+                    if (
+                        workflow_state
+                        and workflow_state.phase == WorkflowPhase.COMPLETED
+                    ):
+                        logger.info(
+                            "[INTERACTIVE-WORKFLOW] Simple answer completed, "
+                            "waiting for next input",
+                            extra={"project_id": options.project_id},
+                        )
+                        continue
+                    logger.info(
+                        "[INTERACTIVE-WORKFLOW] Phase 1 Step 1 complete, "
+                        "waiting for user to provide requirements (Step 2)",
+                        extra={"project_id": options.project_id},
                     )
                     continue
 
@@ -1567,6 +1713,180 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                 yield sse_json("decompose_text", item.data)
             elif item.action == Action.decompose_progress:
                 yield sse_json("to_sub_tasks", item.data)
+
+            # Interactive workflow action handlers
+            elif item.action == Action.provide_requirements:
+                if not USE_INTERACTIVE_WORKFLOW:
+                    logger.warning(
+                        "[INTERACTIVE-WORKFLOW] provide_requirements received "
+                        "but USE_INTERACTIVE_WORKFLOW is False"
+                    )
+                    continue
+
+                logger.info(
+                    "[INTERACTIVE-WORKFLOW] Phase 1 Step 2: "
+                    "Collecting requirements",
+                    extra={"project_id": options.project_id},
+                )
+                workflow_state = get_workflow_state(task_lock)
+                requirements = (
+                    workflow_state.requirements if workflow_state else []
+                )
+                async for event in handle_phase1_step2(
+                    task_lock, options, item.data, requirements
+                ):
+                    yield event
+
+            elif item.action == Action.confirm_requirements:
+                if not USE_INTERACTIVE_WORKFLOW:
+                    logger.warning(
+                        "[INTERACTIVE-WORKFLOW] confirm_requirements received "
+                        "but USE_INTERACTIVE_WORKFLOW is False"
+                    )
+                    continue
+
+                logger.info(
+                    "[INTERACTIVE-WORKFLOW] Phase 1 Step 3: Generating plan",
+                    extra={"project_id": options.project_id},
+                )
+                workflow_state = get_workflow_state(task_lock)
+                requirements = (
+                    workflow_state.requirements if workflow_state else []
+                )
+                schedule = (
+                    workflow_state.schedule_suggestion
+                    if workflow_state
+                    else None
+                )
+
+                if workforce is None:
+                    logger.info(
+                        "[INTERACTIVE-WORKFLOW] Creating workforce for "
+                        "plan generation"
+                    )
+                    (workforce, mcp) = await construct_workforce(options)
+                    for new_agent in options.new_agents:
+                        workforce.add_single_agent_worker(
+                            format_agent_description(new_agent),
+                            await new_agent_model(new_agent, options),
+                        )
+
+                async for event in handle_phase1_step3(
+                    task_lock, options, requirements, schedule, workforce
+                ):
+                    yield event
+
+            elif item.action == Action.update_plan:
+                if not USE_INTERACTIVE_WORKFLOW:
+                    logger.warning(
+                        "[INTERACTIVE-WORKFLOW] update_plan received "
+                        "but USE_INTERACTIVE_WORKFLOW is False"
+                    )
+                    continue
+
+                logger.info(
+                    "[INTERACTIVE-WORKFLOW] Handling plan update",
+                    extra={"project_id": options.project_id},
+                )
+                update_payload = PlanUpdatePayload(**item.data)
+                async for event in handle_plan_update(
+                    task_lock, update_payload
+                ):
+                    yield event
+
+            elif item.action == Action.start_execution:
+                if not USE_INTERACTIVE_WORKFLOW:
+                    logger.warning(
+                        "[INTERACTIVE-WORKFLOW] start_execution received "
+                        "but USE_INTERACTIVE_WORKFLOW is False"
+                    )
+                    continue
+
+                logger.info(
+                    "[INTERACTIVE-WORKFLOW] Phase 2: Starting execution",
+                    extra={"project_id": options.project_id},
+                )
+
+                plan_draft = get_plan_draft(task_lock)
+                if not plan_draft or not plan_draft.can_start:
+                    logger.error(
+                        "[INTERACTIVE-WORKFLOW] Cannot start: "
+                        "plan not ready or not approved"
+                    )
+                    yield sse_json(
+                        "error",
+                        {
+                            "message": "Plan not ready. Please approve the plan first."
+                        },
+                    )
+                    continue
+
+                from app.service.workflow_handler import get_original_message
+
+                original_message = get_original_message(task_lock)
+                question = original_message or options.question
+
+                if workforce is None:
+                    (workforce, mcp) = await construct_workforce(options)
+                    for new_agent in options.new_agents:
+                        workforce.add_single_agent_worker(
+                            format_agent_description(new_agent),
+                            await new_agent_model(new_agent, options),
+                        )
+
+                task_lock.status = Status.confirmed
+                yield sse_json("confirmed", {"question": question})
+
+                clean_task_content = question + options.summary_prompt
+                camel_task = Task(
+                    content=clean_task_content, id=options.task_id
+                )
+                if len(options.attaches) > 0:
+                    camel_task.additional_info = {
+                        Path(file_path).name: file_path
+                        for file_path in options.attaches
+                    }
+
+                sub_tasks = [
+                    Task(id=pt.id, content=pt.content)
+                    for pt in plan_draft.tasks
+                ]
+                camel_task.subtasks = sub_tasks
+                task_lock.decompose_sub_tasks = sub_tasks
+
+                summary_task_content = (
+                    plan_draft.summary or f"Task|{question[:80]}"
+                )
+
+                yield sse_json(
+                    "to_sub_tasks",
+                    {
+                        "project_id": options.project_id,
+                        "task_id": options.task_id,
+                        "sub_tasks": [
+                            {"id": t.id, "content": t.content}
+                            for t in sub_tasks
+                        ],
+                        "delta_sub_tasks": [
+                            {"id": t.id, "content": t.content}
+                            for t in sub_tasks
+                        ],
+                        "is_final": True,
+                        "summary_task": summary_task_content,
+                    },
+                )
+
+                task_lock.status = Status.processing
+                task = asyncio.create_task(workforce.eigent_start(sub_tasks))
+                task_lock.add_background_task(task)
+                logger.info(
+                    "[INTERACTIVE-WORKFLOW] Execution started",
+                    extra={
+                        "project_id": options.project_id,
+                        "task_count": len(sub_tasks),
+                    },
+                )
+
             elif item.action == Action.new_agent:
                 if workforce is not None:
                     workforce.pause()
@@ -1806,131 +2126,203 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                     "[LIFECYCLE] Task lock deleted, breaking out of loop"
                 )
                 break
-            
+
             elif item.action == Action.provide_requirements:
                 # User is providing requirements (e.g., installed MCP, set API key)
                 logger.info("=" * 80)
-                logger.info(f"📦 [REQUIREMENTS] User provided requirements for project {options.project_id}")
+                logger.info(
+                    f"📦 [REQUIREMENTS] User provided requirements for project {options.project_id}"
+                )
                 logger.info("=" * 80)
-                
+
                 if task_lock.phase != "awaiting_requirements":
-                    logger.warning(f"[REQUIREMENTS] Received provide_requirements but phase is {task_lock.phase}")
-                    yield sse_json("error", {"message": "Not currently awaiting requirements"})
+                    logger.warning(
+                        f"[REQUIREMENTS] Received provide_requirements but phase is {task_lock.phase}"
+                    )
+                    yield sse_json(
+                        "error",
+                        {"message": "Not currently awaiting requirements"},
+                    )
                     continue
-                
+
                 # Update options with any new data provided (e.g., new MCP servers)
-                provided_data = item.data if hasattr(item, 'data') else {}
-                if 'mcp_servers' in provided_data:
+                provided_data = item.data if hasattr(item, "data") else {}
+                if "mcp_servers" in provided_data:
                     # Merge new MCP servers with existing
                     if options.installed_mcp is None:
                         options.installed_mcp = {"mcpServers": {}}
                     existing = options.installed_mcp.get("mcpServers", {})
-                    new_servers = provided_data['mcp_servers'].get("mcpServers", {})
+                    new_servers = provided_data["mcp_servers"].get(
+                        "mcpServers", {}
+                    )
                     existing.update(new_servers)
                     options.installed_mcp["mcpServers"] = existing
-                    logger.info(f"[REQUIREMENTS] Updated MCP servers: {list(existing.keys())}")
-                
+                    logger.info(
+                        f"[REQUIREMENTS] Updated MCP servers: {list(existing.keys())}"
+                    )
+
                 # Re-validate requirements
-                logger.info(f"[REQUIREMENTS] Re-validating requirements after user input")
+                logger.info(
+                    "[REQUIREMENTS] Re-validating requirements after user input"
+                )
                 task_lock.phase = "validating"
-                
+
                 validation_results, all_ok = await validate_requirements(
-                    task_lock.requirements,
-                    options,
-                    task_lock
+                    task_lock.requirements, options, task_lock
                 )
                 task_lock.validation_results = validation_results
-                
+
                 # Send updated validation results
-                yield sse_json(Action.requirements_validation.value, {
-                    "project_id": options.project_id,
-                    "task_id": options.task_id,
-                    "results": validation_results,
-                    "all_ok": all_ok
-                })
-                
-                if all_ok:
-                    task_lock.phase = "ready"
-                    logger.info(f"[REQUIREMENTS] All requirements now validated")
-                    yield sse_json(Action.requirements_ready.value, {
+                yield sse_json(
+                    Action.requirements_validation.value,
+                    {
                         "project_id": options.project_id,
                         "task_id": options.task_id,
-                        "message": "All requirements are validated. Ready to start.",
-                        "all_validated": True
-                    })
+                        "results": validation_results,
+                        "all_ok": all_ok,
+                    },
+                )
+
+                if all_ok:
+                    task_lock.phase = "ready"
+                    logger.info(
+                        "[REQUIREMENTS] All requirements now validated"
+                    )
+                    yield sse_json(
+                        Action.requirements_ready.value,
+                        {
+                            "project_id": options.project_id,
+                            "task_id": options.task_id,
+                            "message": "All requirements are validated. Ready to start.",
+                            "all_validated": True,
+                        },
+                    )
                 else:
                     task_lock.phase = "awaiting_requirements"
-                    logger.info(f"[REQUIREMENTS] Still waiting for missing requirements")
-            
+                    logger.info(
+                        "[REQUIREMENTS] Still waiting for missing requirements"
+                    )
+
             elif item.action == Action.confirm_requirements:
                 # User confirms they've provided what they can (proceed even if some optional items missing)
                 logger.info("=" * 80)
-                logger.info(f"✅ [REQUIREMENTS] User confirmed requirements for project {options.project_id}")
+                logger.info(
+                    f"✅ [REQUIREMENTS] User confirmed requirements for project {options.project_id}"
+                )
                 logger.info("=" * 80)
-                
+
                 if task_lock.phase not in ("awaiting_requirements", "ready"):
-                    logger.warning(f"[REQUIREMENTS] Received confirm_requirements but phase is {task_lock.phase}")
-                    yield sse_json("error", {"message": "Cannot confirm requirements in current state"})
+                    logger.warning(
+                        f"[REQUIREMENTS] Received confirm_requirements but phase is {task_lock.phase}"
+                    )
+                    yield sse_json(
+                        "error",
+                        {
+                            "message": "Cannot confirm requirements in current state"
+                        },
+                    )
                     continue
-                
+
                 # Check if all required (not optional) requirements are validated
                 has_required_failures = False
                 if task_lock.requirements and task_lock.validation_results:
-                    for req, val_result in zip(task_lock.requirements, task_lock.validation_results):
-                        if req.get("required", True) and not val_result.get("ok", False):
+                    for req, val_result in zip(
+                        task_lock.requirements, task_lock.validation_results
+                    ):
+                        if req.get("required", True) and not val_result.get(
+                            "ok", False
+                        ):
                             has_required_failures = True
                             break
-                
+
                 if has_required_failures:
-                    logger.warning(f"[REQUIREMENTS] Cannot proceed - required items still missing")
-                    yield sse_json("error", {
-                        "message": "Cannot proceed: some required tools/resources are still missing. Please provide them or remove them from the requirements."
-                    })
+                    logger.warning(
+                        "[REQUIREMENTS] Cannot proceed - required items still missing"
+                    )
+                    yield sse_json(
+                        "error",
+                        {
+                            "message": "Cannot proceed: some required tools/resources are still missing. Please provide them or remove them from the requirements."
+                        },
+                    )
                     continue
-                
+
                 # Proceed to workforce creation
                 task_lock.phase = "ready"
                 question = task_lock.pending_question
-                
-                logger.info(f"[REQUIREMENTS] Proceeding to workforce with question: {question[:100]}...")
+
+                logger.info(
+                    f"[REQUIREMENTS] Proceeding to workforce with question: {question[:100]}..."
+                )
                 yield sse_json("confirmed", {"question": question})
-                
-                context_for_coordinator = build_context_for_workforce(task_lock, options)
-                
+
+                context_for_coordinator = build_context_for_workforce(
+                    task_lock, options
+                )
+
                 # Create workforce
                 if workforce is not None:
-                    logger.debug(f"[REQUIREMENTS] Reusing existing workforce (id={id(workforce)})")
+                    logger.debug(
+                        f"[REQUIREMENTS] Reusing existing workforce (id={id(workforce)})"
+                    )
                 else:
-                    logger.info(f"[REQUIREMENTS] Creating NEW workforce instance")
+                    logger.info(
+                        "[REQUIREMENTS] Creating NEW workforce instance"
+                    )
                     (workforce, mcp) = await construct_workforce(options)
                     for new_agent in options.new_agents:
                         workforce.add_single_agent_worker(
-                            format_agent_description(new_agent), await new_agent_model(new_agent, options)
+                            format_agent_description(new_agent),
+                            await new_agent_model(new_agent, options),
                         )
                 task_lock.status = Status.confirmed
-                
+
                 # Create camel_task
                 clean_task_content = question + options.summary_prompt
-                camel_task = Task(content=clean_task_content, id=options.task_id)
+                camel_task = Task(
+                    content=clean_task_content, id=options.task_id
+                )
                 if len(options.attaches) > 0:
-                    camel_task.additional_info = {Path(file_path).name: file_path for file_path in options.attaches}
-                
-                # Start decomposition (copied from existing flow)
-                stream_state = {"subtasks": [], "seen_ids": set(), "last_content": ""}
-                state_holder: dict[str, Any] = {"sub_tasks": [], "summary_task": ""}
+                    camel_task.additional_info = {
+                        Path(file_path).name: file_path
+                        for file_path in options.attaches
+                    }
 
-                def on_stream_batch(new_tasks: list[Task], is_final: bool = False):
-                    fresh_tasks = [t for t in new_tasks if t.id not in stream_state["seen_ids"]]
+                # Start decomposition (copied from existing flow)
+                stream_state = {
+                    "subtasks": [],
+                    "seen_ids": set(),
+                    "last_content": "",
+                }
+                state_holder: dict[str, Any] = {
+                    "sub_tasks": [],
+                    "summary_task": "",
+                }
+
+                def on_stream_batch(
+                    new_tasks: list[Task], is_final: bool = False
+                ):
+                    fresh_tasks = [
+                        t
+                        for t in new_tasks
+                        if t.id not in stream_state["seen_ids"]
+                    ]
                     for t in fresh_tasks:
                         stream_state["seen_ids"].add(t.id)
                     stream_state["subtasks"].extend(fresh_tasks)
 
                 def on_stream_text(chunk):
                     try:
-                        accumulated_content = chunk.msg.content if hasattr(chunk, 'msg') and chunk.msg else str(chunk)
+                        accumulated_content = (
+                            chunk.msg.content
+                            if hasattr(chunk, "msg") and chunk.msg
+                            else str(chunk)
+                        )
                         last_content = stream_state["last_content"]
                         if accumulated_content.startswith(last_content):
-                            delta_content = accumulated_content[len(last_content):]
+                            delta_content = accumulated_content[
+                                len(last_content) :
+                            ]
                         else:
                             delta_content = accumulated_content
                         stream_state["last_content"] = accumulated_content
@@ -1948,7 +2340,9 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                                 event_loop,
                             )
                     except Exception as e:
-                        logger.warning(f"Failed to stream decomposition text: {e}")
+                        logger.warning(
+                            f"Failed to stream decomposition text: {e}"
+                        )
 
                 async def run_decomposition():
                     nonlocal camel_task, summary_task_content
@@ -1963,33 +2357,50 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                         if stream_state["subtasks"]:
                             decomposed_sub_tasks = stream_state["subtasks"]
                         state_holder["sub_tasks"] = decomposed_sub_tasks
-                        logger.info(f"Task decomposed into {len(decomposed_sub_tasks)} subtasks")
+                        logger.info(
+                            f"Task decomposed into {len(decomposed_sub_tasks)} subtasks"
+                        )
                         try:
-                            setattr(task_lock, "decompose_sub_tasks", decomposed_sub_tasks)
+                            task_lock.decompose_sub_tasks = (
+                                decomposed_sub_tasks
+                            )
                         except Exception:
                             pass
 
                         summary_task_agent = task_summary_agent(options)
                         try:
                             summary_task_content = await asyncio.wait_for(
-                                summary_task(summary_task_agent, camel_task), timeout=10
+                                summary_task(summary_task_agent, camel_task),
+                                timeout=10,
                             )
                             task_lock.summary_generated = True
-                        except asyncio.TimeoutError:
+                        except TimeoutError:
                             logger.warning("summary_task timeout")
                             task_lock.summary_generated = True
-                            content_preview = camel_task.content if hasattr(camel_task, "content") else ""
+                            content_preview = (
+                                camel_task.content
+                                if hasattr(camel_task, "content")
+                                else ""
+                            )
                             if content_preview is None:
                                 content_preview = ""
-                            summary_task_content = (content_preview[:80] + "...") if len(content_preview) > 80 else content_preview
-                            summary_task_content = f"Task|{summary_task_content}"
+                            summary_task_content = (
+                                (content_preview[:80] + "...")
+                                if len(content_preview) > 80
+                                else content_preview
+                            )
+                            summary_task_content = (
+                                f"Task|{summary_task_content}"
+                            )
                         except Exception:
                             task_lock.summary_generated = True
                             summary_task_content = f"Task|{camel_task.content[:80] if camel_task.content else 'Unknown'}..."
 
                         state_holder["summary_task"] = summary_task_content
                         try:
-                            setattr(task_lock, "summary_task_content", summary_task_content)
+                            task_lock.summary_task_content = (
+                                summary_task_content
+                            )
                         except Exception:
                             pass
 
@@ -1997,21 +2408,28 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                             "project_id": options.project_id,
                             "task_id": options.task_id,
                             "sub_tasks": tree_sub_tasks(camel_task.subtasks),
-                            "delta_sub_tasks": tree_sub_tasks(decomposed_sub_tasks),
+                            "delta_sub_tasks": tree_sub_tasks(
+                                decomposed_sub_tasks
+                            ),
                             "is_final": True,
                             "summary_task": summary_task_content,
                         }
-                        await task_lock.put_queue(ActionDecomposeProgressData(data=payload))
+                        await task_lock.put_queue(
+                            ActionDecomposeProgressData(data=payload)
+                        )
                     except Exception as e:
-                        logger.error(f"Error in background decomposition: {e}", exc_info=True)
+                        logger.error(
+                            f"Error in background decomposition: {e}",
+                            exc_info=True,
+                        )
 
                 bg_task = asyncio.create_task(run_decomposition())
                 task_lock.add_background_task(bg_task)
-                
+
                 # Reset phase for next task
                 task_lock.phase = "idle"
                 task_lock.pending_question = None
-            
+
             else:
                 logger.warning(f"Unknown action: {item.action}")
         except ModelProcessingError as e:
@@ -2204,9 +2622,14 @@ Is this a complex task? (yes/no):"""
         return True
 
 
-async def analyze_requirements(agent: ListenChatAgent, question: str, options: Chat, task_lock: TaskLock | None = None) -> dict:
+async def analyze_requirements(
+    agent: ListenChatAgent,
+    question: str,
+    options: Chat,
+    task_lock: TaskLock | None = None,
+) -> dict:
     """Analyze the user's task and identify required tools/resources.
-    
+
     Returns a dict with:
     - requirements: list of requirement items
     - questions_for_user: optional clarifying questions
@@ -2214,17 +2637,25 @@ async def analyze_requirements(agent: ListenChatAgent, question: str, options: C
     """
     context_prompt = ""
     if task_lock:
-        context_prompt = build_conversation_context(task_lock, header="=== Previous Conversation ===")
-    
+        context_prompt = build_conversation_context(
+            task_lock, header="=== Previous Conversation ==="
+        )
+
     # Get currently available tools/resources for context
     available_context = []
     if options.installed_mcp:
-        available_context.append(f"Available MCP servers: {list(options.installed_mcp.get('mcpServers', {}).keys())}")
+        available_context.append(
+            f"Available MCP servers: {list(options.installed_mcp.get('mcpServers', {}).keys())}"
+        )
     if options.attaches:
         available_context.append(f"Attached files: {options.attaches}")
-    
-    available_str = "\n".join(available_context) if available_context else "No tools/resources currently configured."
-    
+
+    available_str = (
+        "\n".join(available_context)
+        if available_context
+        else "No tools/resources currently configured."
+    )
+
     prompt = f"""{context_prompt}
 
 === CURRENTLY AVAILABLE RESOURCES ===
@@ -2240,16 +2671,26 @@ Respond with a valid JSON object following the specified format."""
 
     try:
         resp = agent.step(prompt)
-        
+
         if not resp or not resp.msgs or len(resp.msgs) == 0:
-            logger.warning("No response from requirements analyzer, returning empty requirements")
-            return {"requirements": [], "questions_for_user": [], "summary": "Unable to analyze requirements"}
-        
+            logger.warning(
+                "No response from requirements analyzer, returning empty requirements"
+            )
+            return {
+                "requirements": [],
+                "questions_for_user": [],
+                "summary": "Unable to analyze requirements",
+            }
+
         content = resp.msgs[0].content
         if not content:
             logger.warning("Empty content from requirements analyzer")
-            return {"requirements": [], "questions_for_user": [], "summary": "Unable to analyze requirements"}
-        
+            return {
+                "requirements": [],
+                "questions_for_user": [],
+                "summary": "Unable to analyze requirements",
+            }
+
         # Try to parse JSON from response
         try:
             # Handle potential markdown code blocks
@@ -2257,84 +2698,113 @@ Respond with a valid JSON object following the specified format."""
                 content = content.split("```json")[1].split("```")[0].strip()
             elif "```" in content:
                 content = content.split("```")[1].split("```")[0].strip()
-            
+
             result = json.loads(content)
-            
+
             # Validate and normalize the result
             if "requirements" not in result:
                 result["requirements"] = []
             if "questions_for_user" not in result:
                 result["questions_for_user"] = []
             if "summary" not in result:
-                result["summary"] = f"Identified {len(result['requirements'])} requirements"
-            
+                result["summary"] = (
+                    f"Identified {len(result['requirements'])} requirements"
+                )
+
             # Add status field to each requirement
             for req in result["requirements"]:
                 if "status" not in req:
                     req["status"] = "missing"
                 if "id" not in req:
-                    req["id"] = f"{req.get('type', 'unknown')}:{req.get('name', 'unknown').lower().replace(' ', '_')}"
-            
-            logger.info(f"Requirements analysis complete: {len(result['requirements'])} requirements identified")
+                    req["id"] = (
+                        f"{req.get('type', 'unknown')}:{req.get('name', 'unknown').lower().replace(' ', '_')}"
+                    )
+
+            logger.info(
+                f"Requirements analysis complete: {len(result['requirements'])} requirements identified"
+            )
             return result
-            
+
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse requirements JSON: {e}")
             # Return a conservative fallback
             return {
                 "requirements": [],
-                "questions_for_user": ["Could you please clarify what tools or resources you have available for this task?"],
-                "summary": "Unable to parse requirements - please provide more details"
+                "questions_for_user": [
+                    "Could you please clarify what tools or resources you have available for this task?"
+                ],
+                "summary": "Unable to parse requirements - please provide more details",
             }
-    
+
     except Exception as e:
         logger.error(f"Error in analyze_requirements: {e}")
-        return {"requirements": [], "questions_for_user": [], "summary": f"Error analyzing requirements: {str(e)}"}
+        return {
+            "requirements": [],
+            "questions_for_user": [],
+            "summary": f"Error analyzing requirements: {str(e)}",
+        }
 
 
-async def validate_requirements(requirements: list, options: Chat, task_lock: TaskLock) -> tuple[list, bool]:
+async def validate_requirements(
+    requirements: list, options: Chat, task_lock: TaskLock
+) -> tuple[list, bool]:
     """Validate access to all required tools/resources.
-    
+
     Returns:
     - results: list of validation results per requirement
     - all_ok: True if all required validations passed
     """
     results = []
     all_ok = True
-    
+
     for req in requirements:
         req_id = req.get("id", "unknown")
         req_type = req.get("type", "unknown")
         req_name = req.get("name", "Unknown")
         is_required = req.get("required", True)
-        
+
         validation_result = {
             "id": req_id,
             "name": req_name,
             "type": req_type,
             "ok": False,
-            "message": ""
+            "message": "",
         }
-        
+
         try:
             if req_type == "mcp_server":
                 # Check if MCP server is installed
                 mcp_servers = options.installed_mcp or {}
-                installed_servers = list(mcp_servers.get("mcpServers", {}).keys())
-                
+                installed_servers = list(
+                    mcp_servers.get("mcpServers", {}).keys()
+                )
+
                 # Simple name matching
-                server_name = req_name.lower().replace(" ", "").replace("_", "").replace("-", "")
+                server_name = (
+                    req_name.lower()
+                    .replace(" ", "")
+                    .replace("_", "")
+                    .replace("-", "")
+                )
                 is_installed = any(
-                    server_name in s.lower().replace(" ", "").replace("_", "").replace("-", "") 
+                    server_name
+                    in s.lower()
+                    .replace(" ", "")
+                    .replace("_", "")
+                    .replace("-", "")
                     for s in installed_servers
                 )
-                
+
                 if is_installed:
                     validation_result["ok"] = True
-                    validation_result["message"] = f"MCP server '{req_name}' is installed"
+                    validation_result["message"] = (
+                        f"MCP server '{req_name}' is installed"
+                    )
                 else:
-                    validation_result["message"] = f"MCP server '{req_name}' not found. Please install it from the MCP settings."
-                    
+                    validation_result["message"] = (
+                        f"MCP server '{req_name}' not found. Please install it from the MCP settings."
+                    )
+
             elif req_type == "api_key":
                 # Check for common API key environment variables
                 key_name = req_name.upper().replace(" ", "_").replace("-", "_")
@@ -2342,64 +2812,84 @@ async def validate_requirements(requirements: list, options: Chat, task_lock: Ta
                     key_name,
                     f"{key_name}_KEY",
                     f"{key_name}_API_KEY",
-                    key_name.replace("_API", "")
+                    key_name.replace("_API", ""),
                 ]
-                
+
                 found_key = any(os.getenv(k) for k in possible_keys)
                 if found_key:
                     validation_result["ok"] = True
-                    validation_result["message"] = f"API key for '{req_name}' found"
+                    validation_result["message"] = (
+                        f"API key for '{req_name}' found"
+                    )
                 else:
-                    validation_result["message"] = f"API key for '{req_name}' not found in environment"
-                    
+                    validation_result["message"] = (
+                        f"API key for '{req_name}' not found in environment"
+                    )
+
             elif req_type == "file_access":
                 # Check if working directory exists and is accessible
                 working_dir = get_working_directory(options, task_lock)
                 if working_dir and os.path.exists(working_dir):
                     if os.access(working_dir, os.R_OK):
                         validation_result["ok"] = True
-                        validation_result["message"] = f"File access available at {working_dir}"
+                        validation_result["message"] = (
+                            f"File access available at {working_dir}"
+                        )
                     else:
-                        validation_result["message"] = f"Cannot read from {working_dir}"
+                        validation_result["message"] = (
+                            f"Cannot read from {working_dir}"
+                        )
                 else:
                     # Check if attachments are provided
                     if options.attaches:
                         validation_result["ok"] = True
-                        validation_result["message"] = f"File access via attachments: {len(options.attaches)} file(s)"
+                        validation_result["message"] = (
+                            f"File access via attachments: {len(options.attaches)} file(s)"
+                        )
                     else:
-                        validation_result["message"] = "No working directory or attachments provided"
-                        
+                        validation_result["message"] = (
+                            "No working directory or attachments provided"
+                        )
+
             elif req_type == "browser":
                 # Browser capability is generally available
                 validation_result["ok"] = True
                 validation_result["message"] = "Browser agent available"
-                
+
             elif req_type == "terminal":
                 # Terminal capability is generally available
                 working_dir = get_working_directory(options, task_lock)
                 if working_dir and os.path.exists(working_dir):
                     validation_result["ok"] = True
-                    validation_result["message"] = f"Terminal access available at {working_dir}"
+                    validation_result["message"] = (
+                        f"Terminal access available at {working_dir}"
+                    )
                 else:
                     validation_result["ok"] = True
-                    validation_result["message"] = "Terminal access available (default directory)"
-                    
+                    validation_result["message"] = (
+                        "Terminal access available (default directory)"
+                    )
+
             else:
                 # Unknown type - mark as needing user confirmation
                 validation_result["ok"] = False
-                validation_result["message"] = f"Please confirm you have access to: {req_name}"
-                
+                validation_result["message"] = (
+                    f"Please confirm you have access to: {req_name}"
+                )
+
         except Exception as e:
             logger.error(f"Error validating requirement {req_id}: {e}")
             validation_result["message"] = f"Validation error: {str(e)}"
-        
+
         results.append(validation_result)
-        
+
         # Track overall status (only required items affect all_ok)
         if is_required and not validation_result["ok"]:
             all_ok = False
-    
-    logger.info(f"Requirements validation complete: {len(results)} checked, all_ok={all_ok}")
+
+    logger.info(
+        f"Requirements validation complete: {len(results)} checked, all_ok={all_ok}"
+    )
     return results, all_ok
 
 
@@ -2513,11 +3003,24 @@ async def get_task_result_with_optional_summary(
         except Exception as e:
             logger.error(f"Failed to generate summary for task {task.id}: {e}")
     elif task.subtasks and len(task.subtasks) == 1:
-        logger.info(f"Task {task.id} has only 1 subtask, skipping LLM summary")
-        if result and "--- Subtask" in result and "Result ---" in result:
-            parts = result.split("Result ---", 1)
-            if len(parts) > 1:
-                result = parts[1].strip()
+        logger.info(f"Task {task.id} has 1 subtask, generating summary")
+        try:
+            summary_agent = task_summary_agent(options)
+            summarized_result = await summary_subtasks_result(
+                summary_agent, task
+            )
+            result = summarized_result
+            logger.info(f"Successfully generated summary for task {task.id}")
+        except Exception as e:
+            logger.error(f"Failed to generate summary for task {task.id}: {e}")
+            if result and "--- Subtask" in result and "Result ---" in result:
+                parts = result.split("Result ---", 1)
+                if len(parts) > 1:
+                    result = parts[1].strip()
+            elif not result or result.strip() == "":
+                subtask_result = task.subtasks[0].result
+                if subtask_result:
+                    result = str(subtask_result)
 
     return result
 

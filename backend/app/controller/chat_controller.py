@@ -39,17 +39,25 @@ from app.service.chat_service import step_solve
 from app.service.task import (
     Action,
     ActionAddTaskData,
+    ActionConfirmRequirementsData,
     ActionImproveData,
     ActionInstallMcpData,
+    ActionProvideRequirementsData,
     ActionRemoveTaskData,
     ActionSkipTaskData,
+    ActionStartExecutionData,
     ActionStopData,
     ActionSupplementData,
+    ActionUpdatePlanData,
     delete_task_lock,
     get_or_create_task_lock,
     get_task_lock,
     set_current_task_id,
     task_locks,
+)
+from app.service.workflow_handler import (
+    get_plan_draft,
+    get_workflow_state,
 )
 
 router = APIRouter()
@@ -537,3 +545,131 @@ def skip_task(project_id: str):
             f" {e}"
         )
         raise UserException(code.error, f"Failed to skip task: {str(e)}")
+
+
+# Pydantic models for interactive workflow endpoints
+from pydantic import BaseModel
+
+
+class ProvideRequirementsRequest(BaseModel):
+    requirements: dict
+
+
+class UpdatePlanRequest(BaseModel):
+    update_type: str
+    task_id: str | None = None
+    task_data: dict | None = None
+    task_order: list[str] | None = None
+    feedback: str | None = None
+
+
+@router.post("/chat/{id}/provide-requirements", name="provide requirements")
+def provide_requirements(id: str, data: ProvideRequirementsRequest):
+    """Provide requirements for the interactive workflow (Phase 1 Step 2)"""
+    chat_logger.info(
+        "Providing requirements for interactive workflow",
+        extra={"task_id": id},
+    )
+    task_lock = get_task_lock(id)
+    asyncio.run(
+        task_lock.put_queue(
+            ActionProvideRequirementsData(data=data.requirements)
+        )
+    )
+    chat_logger.info(
+        "Requirements provided, queued for processing",
+        extra={"task_id": id},
+    )
+    return Response(status_code=201)
+
+
+@router.post("/chat/{id}/confirm-requirements", name="confirm requirements")
+def confirm_requirements(id: str):
+    """Confirm requirements and proceed to plan generation (Phase 1 Step 3)"""
+    chat_logger.info(
+        "Confirming requirements for interactive workflow",
+        extra={"task_id": id},
+    )
+    task_lock = get_task_lock(id)
+    asyncio.run(task_lock.put_queue(ActionConfirmRequirementsData()))
+    chat_logger.info(
+        "Requirements confirmed, proceeding to plan generation",
+        extra={"task_id": id},
+    )
+    return Response(status_code=201)
+
+
+@router.post("/chat/{id}/update-plan", name="update plan")
+def update_plan(id: str, data: UpdatePlanRequest):
+    """Update the task plan in the interactive workflow"""
+    chat_logger.info(
+        "Updating plan for interactive workflow",
+        extra={"task_id": id, "update_type": data.update_type},
+    )
+    task_lock = get_task_lock(id)
+    asyncio.run(
+        task_lock.put_queue(ActionUpdatePlanData(data=data.model_dump()))
+    )
+    chat_logger.info(
+        "Plan update queued",
+        extra={"task_id": id},
+    )
+    return Response(status_code=201)
+
+
+@router.post("/chat/{id}/start-execution", name="start execution")
+def start_execution(id: str):
+    """Start task execution after plan approval (Phase 2)"""
+    chat_logger.info(
+        "Starting execution for interactive workflow",
+        extra={"task_id": id},
+    )
+    # Use get_task_lock_if_exists to avoid exception if task_lock is gone
+    from app.service.task import get_task_lock_if_exists
+
+    task_lock = get_task_lock_if_exists(id)
+    if task_lock is None:
+        chat_logger.error(
+            "Task lock not found for start_execution - workflow may have been interrupted",
+            extra={"task_id": id},
+        )
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=404,
+            detail="Workflow session not found. Please start a new task.",
+        )
+    asyncio.run(task_lock.put_queue(ActionStartExecutionData()))
+    chat_logger.info(
+        "Execution start queued",
+        extra={"task_id": id},
+    )
+    return Response(status_code=201)
+
+
+@router.get("/chat/{id}/workflow-state", name="get workflow state")
+def get_workflow_state_endpoint(id: str):
+    """Get the current workflow state for the interactive workflow"""
+    chat_logger.info(
+        "Getting workflow state",
+        extra={"task_id": id},
+    )
+    task_lock = get_task_lock(id)
+    workflow_state = get_workflow_state(task_lock)
+    if workflow_state:
+        return workflow_state.model_dump(mode="json")
+    return {"phase": None, "step": None, "status_message": "No workflow state"}
+
+
+@router.get("/chat/{id}/plan-draft", name="get plan draft")
+def get_plan_draft_endpoint(id: str):
+    """Get the current plan draft for the interactive workflow"""
+    chat_logger.info(
+        "Getting plan draft",
+        extra={"task_id": id},
+    )
+    task_lock = get_task_lock(id)
+    plan_draft = get_plan_draft(task_lock)
+    if plan_draft:
+        return plan_draft.model_dump(mode="json")
+    return {"tasks": [], "summary": None, "can_start": False}

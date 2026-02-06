@@ -1,10 +1,6 @@
 {
-  "*.{ts,tsx}": [
-    "eslint --fix --no-warn-ignored",
-    "prettier --write",
-    "node licenses/update_license.js"
-  ],
-  "*.{js,jsx}": ["eslint --fix --no-warn-ignored", "prettier --write"],
+  "*.{ts,tsx}": ["prettier --write", "node licenses/update_license.js"],
+  "*.{js,jsx}": ["prettier --write"],
   "*.{json,css,md}": ["prettier --write"],
   "*.py": ["node licenses/update_license.js"]
 }
