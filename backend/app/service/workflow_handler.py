@@ -49,12 +49,13 @@ def store_workflow_state(task_lock: TaskLock, state: WorkflowState) -> None:
     if not hasattr(task_lock, "workflow_state"):
         task_lock.workflow_state = None
     task_lock.workflow_state = state
-    logger.debug(
-        "Workflow state stored",
+    logger.info(
+        "[DEBUG] Workflow state stored",
         extra={
             "task_id": task_lock.id,
             "phase": state.phase.value,
             "step": state.step.value if state.step else None,
+            "is_ready_to_start": state.is_ready_to_start,
         },
     )
 
@@ -69,7 +70,7 @@ def store_plan_draft(task_lock: TaskLock, plan: PlanDraft) -> None:
     if not hasattr(task_lock, "plan_draft"):
         task_lock.plan_draft = None
     task_lock.plan_draft = plan
-    logger.debug(
+    logger.info(
         "Plan draft stored",
         extra={"task_id": task_lock.id, "task_count": len(plan.tasks)},
     )
@@ -324,7 +325,7 @@ async def handle_phase1_step2(
         if req.id in user_input:
             req.value = user_input[req.id]
             req.status = RequirementStatus.PROVIDED
-            logger.debug(
+            logger.info(
                 "Requirement updated",
                 extra={"task_id": task_lock.id, "requirement_id": req.id},
             )
@@ -565,10 +566,13 @@ async def handle_plan_update(
         SSE JSON events for the frontend
     """
     logger.info(
-        "Handling plan update",
+        "[DEBUG] Handling plan update",
         extra={
             "task_id": task_lock.id,
             "update_type": update_data.update_type.value,
+            "has_task_id": update_data.task_id is not None,
+            "has_task_data": update_data.task_data is not None,
+            "has_feedback": update_data.feedback is not None,
         },
     )
 
@@ -579,7 +583,7 @@ async def handle_plan_update(
     if update_data.update_type == PlanUpdateType.ADD_TASK:
         if update_data.task_data:
             plan_draft.tasks.append(update_data.task_data)
-            logger.debug(
+            logger.info(
                 "Task added to plan",
                 extra={
                     "task_id": task_lock.id,
@@ -595,7 +599,7 @@ async def handle_plan_update(
             for task in plan_draft.tasks:
                 if update_data.task_id in task.dependencies:
                     task.dependencies.remove(update_data.task_id)
-            logger.debug(
+            logger.info(
                 "Task removed from plan",
                 extra={
                     "task_id": task_lock.id,
@@ -614,7 +618,7 @@ async def handle_plan_update(
                 if task.id not in update_data.task_order:
                     reordered_tasks.append(task)
             plan_draft.tasks = reordered_tasks
-            logger.debug(
+            logger.info(
                 "Tasks reordered",
                 extra={
                     "task_id": task_lock.id,
@@ -628,7 +632,7 @@ async def handle_plan_update(
                 if task.id == update_data.task_id:
                     plan_draft.tasks[i] = update_data.task_data
                     break
-            logger.debug(
+            logger.info(
                 "Task modified",
                 extra={
                     "task_id": task_lock.id,

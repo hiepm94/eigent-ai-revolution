@@ -269,13 +269,30 @@ export default function ChatBox(): JSX.Element {
   }, [chatStore?.activeTaskId, chatStore?.tasks]);
 
   const isInputDisabled = useMemo(() => {
-    if (!chatStore?.activeTaskId || !chatStore.tasks[chatStore.activeTaskId])
+    if (!chatStore?.activeTaskId || !chatStore.tasks[chatStore.activeTaskId]) {
+      console.log('[ChatBox] Input disabled: no active task', {
+        hasActiveTaskId: !!chatStore?.activeTaskId,
+        hasTask: !!chatStore?.tasks[chatStore.activeTaskId || ''],
+      });
       return true;
+    }
 
     const task = chatStore.tasks[chatStore.activeTaskId];
+    console.log('[ChatBox] Input disabled check', {
+      taskStatus: task.status,
+      isTaskBusy,
+      hasModel,
+      privacy,
+      useCloudModelInDev,
+      activeAsk: task.activeAsk,
+      activeWorkSpace: task.activeWorkSpace,
+    });
 
     // If ask human is active, allow input
-    if (task.activeAsk) return false;
+    if (task.activeAsk) {
+      console.debug('[ChatBox] Input enabled: activeAsk is true');
+      return false;
+    }
 
     // NEW: Allow input during planning phases (Phase 1) for interactive modifications
     const planningPhases: string[] = [
@@ -285,21 +302,60 @@ export default function ChatBox(): JSX.Element {
       ChatTaskStatus.READY,
     ];
     if (planningPhases.includes(task.status as string)) {
+      console.log('[ChatBox] ✓ In planning phase, checking requirements', {
+        taskStatus: task.status,
+        hasModel,
+        privacy,
+        useCloudModelInDev,
+        planningPhases,
+      });
       // During planning phases, only check basic requirements
-      if (!hasModel) return true;
-      if (!privacy) return true;
-      if (useCloudModelInDev) return true;
+      if (!hasModel) {
+        console.log('[ChatBox] Input disabled: no model');
+        return true;
+      }
+      if (!privacy) {
+        console.log('[ChatBox] Input disabled: privacy not set');
+        return true;
+      }
+      if (useCloudModelInDev) {
+        console.log('[ChatBox] Input disabled: cloud model in dev');
+        return true;
+      }
+      console.log(
+        '[ChatBox] ✓ Input ENABLED: planning phase with valid requirements'
+      );
       return false; // Allow input during planning
     }
 
-    if (isTaskBusy) return true;
+    if (isTaskBusy) {
+      console.debug('[ChatBox] Input disabled: task is busy');
+      return true;
+    }
 
     // Standard checks - check model first, then privacy
-    if (!hasModel) return true;
-    if (!privacy) return true;
-    if (useCloudModelInDev) return true;
-    if (task.isContextExceeded) return true;
+    if (!hasModel) {
+      console.debug('[ChatBox] Input disabled: no model (standard check)');
+      return true;
+    }
+    if (!privacy) {
+      console.debug(
+        '[ChatBox] Input disabled: privacy not set (standard check)'
+      );
+      return true;
+    }
+    if (useCloudModelInDev) {
+      console.debug(
+        '[ChatBox] Input disabled: cloud model in dev (standard check)'
+      );
+      return true;
+    }
+    if (task.isContextExceeded) {
+      console.debug('[ChatBox] Input disabled: context exceeded');
+      return true;
+    }
 
+    console.debug('[ChatBox] Input enabled: all checks passed');
     return false;
   }, [
     chatStore?.activeTaskId,
@@ -420,22 +476,52 @@ export default function ChatBox(): JSX.Element {
 
   const handleSend = async (messageStr?: string, taskId?: string) => {
     const _taskId = taskId || chatStore.activeTaskId;
-    if (message.trim() === '' && !messageStr) return;
+    console.log('[handleSend] Called', {
+      messageStr,
+      taskId,
+      _taskId,
+      messageLength: message.trim().length,
+      hasMessage: message.trim().length > 0,
+    });
+
+    if (message.trim() === '' && !messageStr) {
+      console.log('[handleSend] Empty message, returning early');
+      return;
+    }
 
     // Check model first, then privacy
     if (!hasModel) {
+      console.log('[handleSend] No model configured');
       toast.error('Please select a model first.');
       navigate('/setting/models');
       return;
     }
     if (!privacy) {
+      console.log('[handleSend] Privacy not accepted');
       toast.error('Please accept the privacy policy first.');
       return;
     }
 
     const tempMessageContent = messageStr || message;
+    console.log('[handleSend] Message content', {
+      tempMessageContent: tempMessageContent.substring(0, 100),
+      _taskId,
+    });
     chatStore.setHasMessages(_taskId as string, true);
-    if (!_taskId) return;
+    if (!_taskId) {
+      console.log('[handleSend] No task ID, returning');
+      return;
+    }
+
+    // Defensive check: verify the task exists
+    if (!chatStore.tasks[_taskId]) {
+      console.error('[handleSend] Task does not exist:', {
+        _taskId,
+        availableTasks: Object.keys(chatStore.tasks),
+      });
+      toast.error('Task not found. Please try again.');
+      return;
+    }
 
     // Multi-turn support: Check if task is running or planning
     const task = chatStore.tasks[_taskId];
@@ -461,6 +547,10 @@ export default function ChatBox(): JSX.Element {
 
     if (textareaRef.current) textareaRef.current.style.height = '60px';
     try {
+      console.log('[handleSend] Starting main logic block', {
+        requiresHumanReply,
+        _taskId,
+      });
       if (requiresHumanReply) {
         chatStore.addMessages(_taskId, {
           id: generateUniqueId(),
@@ -523,6 +613,11 @@ export default function ChatBox(): JSX.Element {
         const isInInteractiveWorkflow = interactiveWorkflowPhases.includes(
           chatStore.tasks[_taskId as string].status as string
         );
+        console.log('[Multi-turn] Checking workflow phases', {
+          taskStatus: chatStore.tasks[_taskId as string].status,
+          isInInteractiveWorkflow,
+          interactiveWorkflowPhases,
+        });
 
         // Continue conversation if:
         // 1. Has wait confirm (simple query response) - but not if task was stopped
@@ -537,83 +632,170 @@ export default function ChatBox(): JSX.Element {
               ChatTaskStatus.PENDING) ||
           isInInteractiveWorkflow;
 
-        if (shouldContinueConversation) {
-          // Check if this is the very first message and task hasn't started
-          const hasSimpleResponse = chatStore.tasks[
-            _taskId as string
-          ].messages.some((m) => m.step === AgentStep.WAIT_CONFIRM);
-          const hasComplexTask = chatStore.tasks[
-            _taskId as string
-          ].messages.some((m) => m.step === AgentStep.TO_SUB_TASKS);
-          const hasErrorMessage = chatStore.tasks[
-            _taskId as string
-          ].messages.some(
-            (m) => m.role === 'agent' && m.content.startsWith('❌ **Error**:')
-          );
+        console.log('[Multi-turn] shouldContinueConversation check', {
+          hasWaitComfirm,
+          wasTaskStopped,
+          isFinished,
+          hasMessages,
+          isPending:
+            chatStore.tasks[_taskId as string].status ===
+            ChatTaskStatus.PENDING,
+          isInInteractiveWorkflow,
+          shouldContinueConversation,
+          taskStatus: chatStore.tasks[_taskId as string].status,
+        });
 
-          // Only start a new task if: pending, no messages processed yet
-          // OR while or after replaying a project
-          if (
-            (chatStore.tasks[_taskId as string].status ===
-              ChatTaskStatus.PENDING &&
-              !hasSimpleResponse &&
-              !hasComplexTask &&
-              !isFinished) ||
-            chatStore.tasks[_taskId].type === 'replay' ||
-            hasErrorMessage
-          ) {
-            setMessage('');
-            // Pass the message content to startTask instead of adding it to current chatStore
-            const attachesToSend =
-              JSON.parse(JSON.stringify(chatStore.tasks[_taskId]?.attaches)) ||
-              [];
-            try {
-              await chatStore.startTask(
-                _taskId,
-                undefined,
-                undefined,
-                undefined,
-                tempMessageContent,
-                attachesToSend
-              );
-            } catch (err: any) {
-              console.error('Failed to start task:', err);
-              toast.error(
-                err?.message ||
-                  'Failed to start task. Please check your model configuration.'
-              );
-              return;
+        console.log('[Multi-turn] Entering shouldContinueConversation block', {
+          entering: shouldContinueConversation,
+        });
+
+        if (shouldContinueConversation) {
+          console.log(
+            '[Multi-turn] Inside shouldContinueConversation, about to check messages',
+            {
+              taskId: _taskId,
+              taskExists: !!chatStore.tasks[_taskId as string],
+              messagesType: typeof chatStore.tasks[_taskId as string]?.messages,
+              messagesIsArray: Array.isArray(
+                chatStore.tasks[_taskId as string]?.messages
+              ),
+              messagesLength:
+                chatStore.tasks[_taskId as string]?.messages?.length,
             }
-            // keep hasWaitComfirm as true so that follow-up improves work as usual
-          } else {
-            // Continue conversation: simple response, complex task, or finished task
-            console.log(
-              '[Multi-turn] Continuing conversation with improve API'
+          );
+          try {
+            // Check if this is the very first message and task hasn't started
+            const taskMessages =
+              chatStore.tasks[_taskId as string]?.messages || [];
+            console.log('[Multi-turn] taskMessages extracted', {
+              taskMessagesType: typeof taskMessages,
+              taskMessagesIsArray: Array.isArray(taskMessages),
+              taskMessagesLength: taskMessages?.length,
+            });
+            const hasSimpleResponse = taskMessages.some(
+              (m) => m.step === AgentStep.WAIT_CONFIRM
+            );
+            const hasComplexTask = taskMessages.some(
+              (m) => m.step === AgentStep.TO_SUB_TASKS
+            );
+            const hasErrorMessage = taskMessages.some(
+              (m) =>
+                m.role === 'agent' &&
+                typeof m.content === 'string' &&
+                m.content.startsWith('❌ **Error**:')
             );
 
-            //Generate nextId in case new chatStore is created to sync with the backend beforehand
-            const nextTaskId = generateUniqueId();
-            chatStore.setNextTaskId(nextTaskId);
+            // Only start a new task if: pending, no messages processed yet
+            // OR while or after replaying a project
+            const shouldStartNewTask =
+              (chatStore.tasks[_taskId as string].status ===
+                ChatTaskStatus.PENDING &&
+                !hasSimpleResponse &&
+                !hasComplexTask &&
+                !isFinished) ||
+              chatStore.tasks[_taskId].type === 'replay' ||
+              hasErrorMessage;
 
-            // Use improve endpoint (POST /chat/{id}) - {id} is project_id
-            // This reuses the existing SSE connection and step_solve loop
-            fetchPost(`/chat/${projectStore.activeProjectId}`, {
-              question: tempMessageContent,
-              task_id: nextTaskId,
+            console.log('[Multi-turn] Task path decision', {
+              taskStatus: chatStore.tasks[_taskId as string].status,
+              hasSimpleResponse,
+              hasComplexTask,
+              isFinished,
+              isReplay: chatStore.tasks[_taskId].type === 'replay',
+              hasErrorMessage,
+              shouldStartNewTask,
             });
-            chatStore.setIsPending(_taskId, true);
-            // Add the user message to show it in UI
-            chatStore.addMessages(_taskId, {
-              id: generateUniqueId(),
-              role: 'user',
-              content: tempMessageContent,
-              attaches:
+
+            if (shouldStartNewTask) {
+              setMessage('');
+              // Pass the message content to startTask instead of adding it to current chatStore
+              const attachesToSend =
                 JSON.parse(
                   JSON.stringify(chatStore.tasks[_taskId]?.attaches)
-                ) || [],
-            });
-            chatStore.setAttaches(_taskId, []);
-            setMessage('');
+                ) || [];
+              try {
+                await chatStore.startTask(
+                  _taskId,
+                  undefined,
+                  undefined,
+                  undefined,
+                  tempMessageContent,
+                  attachesToSend
+                );
+              } catch (err: any) {
+                console.error('Failed to start task:', err);
+                toast.error(
+                  err?.message ||
+                    'Failed to start task. Please check your model configuration.'
+                );
+                return;
+              }
+              // keep hasWaitComfirm as true so that follow-up improves work as usual
+            } else {
+              // Continue conversation: simple response, complex task, or finished task
+              console.log('[Multi-turn] Using improve API for refinement', {
+                taskStatus: chatStore.tasks[_taskId as string].status,
+              });
+
+              //Generate nextId in case new chatStore is created to sync with the backend beforehand
+              const nextTaskId = generateUniqueId();
+              chatStore.setNextTaskId(nextTaskId);
+
+              // Add the user message to show it in UI immediately
+              chatStore.addMessages(_taskId, {
+                id: generateUniqueId(),
+                role: 'user',
+                content: tempMessageContent,
+                attaches:
+                  JSON.parse(
+                    JSON.stringify(chatStore.tasks[_taskId]?.attaches)
+                  ) || [],
+              });
+              chatStore.setAttaches(_taskId, []);
+              setMessage('');
+
+              // Use improve endpoint (POST /chat/{id}) - {id} is project_id
+              // This reuses the existing SSE connection and step_solve loop
+              try {
+                console.log('[Multi-turn] Calling improve API', {
+                  projectId: projectStore.activeProjectId,
+                  question: tempMessageContent,
+                  taskId: nextTaskId,
+                  currentTaskId: _taskId,
+                });
+                await fetchPost(`/chat/${projectStore.activeProjectId}`, {
+                  question: tempMessageContent,
+                  task_id: nextTaskId,
+                });
+                console.log('[Multi-turn] Improve API call successful');
+              } catch (err: any) {
+                console.error(
+                  '[Multi-turn] Failed to send refinement message:',
+                  err
+                );
+                toast.error(
+                  err?.message ||
+                    'Failed to send refinement message. Please try again.'
+                );
+                return;
+              }
+              chatStore.setIsPending(_taskId, true);
+            }
+          } catch (e: any) {
+            console.error(
+              '[Multi-turn] Error in shouldContinueConversation block:',
+              {
+                error: e,
+                errorString: String(e),
+                errorMessage: e?.message,
+                errorStack: e?.stack,
+                taskId: _taskId,
+                hasTask: !!chatStore.tasks[_taskId as string],
+                hasMessages: !!chatStore.tasks[_taskId as string]?.messages,
+              }
+            );
+            toast.error('Error processing message. Please try again.');
+            return;
           }
         } else {
           if (!privacy) {

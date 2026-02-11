@@ -172,11 +172,26 @@ export const Inputbox = ({
   };
 
   const handleSend = () => {
+    console.log('[InputBox] handleSend called', {
+      hasValue: value.trim().length > 0,
+      disabled,
+      valueLength: value.trim().length,
+      value: value.substring(0, 100),
+    });
     if (value.trim().length > 0 && !disabled) {
+      console.log('[InputBox] ✓ Sending message', {
+        valueLength: value.trim().length,
+        onSendDefined: !!onSend,
+      });
       onSend?.();
     } else if (value.trim().length === 0) {
+      console.log('[InputBox] Message empty');
       toast.error('Message cannot be empty', {
         closeButton: true,
+      });
+    } else if (disabled) {
+      console.log('[InputBox] ✗ Message blocked - input is disabled', {
+        disabled,
       });
     }
   };

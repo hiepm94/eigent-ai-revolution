@@ -84,7 +84,7 @@ async def _cleanup_task_lock_safe(task_lock, reason: str) -> bool:
 
     # Check if task_lock still exists before attempting cleanup
     if task_lock.id not in task_locks:
-        chat_logger.debug(
+        chat_logger.info(
             f"[{reason}] Task lock already removed, skipping cleanup",
             extra={"task_id": task_lock.id},
         )
@@ -204,7 +204,7 @@ async def post(data: Chat, request: Request):
         for key, value in data.search_config.items():
             if value:
                 os.environ[key] = value
-                chat_logger.debug(
+                chat_logger.info(
                     f"Set search config: {key}",
                     extra={"project_id": data.project_id},
                 )
@@ -257,11 +257,30 @@ def improve(id: str, data: SupplementChat):
         "Chat improvement requested",
         extra={"task_id": id, "question_length": len(data.question)},
     )
+    chat_logger.info(
+        "[DEBUG] improve() - Chat improvement request details",
+        extra={
+            "task_id": id,
+            "user_question": data.question[:100],
+            "new_task_id": data.task_id,
+        },
+    )
     task_lock = get_task_lock(id)
+    chat_logger.info(
+        "[DEBUG] improve() - Task lock retrieved",
+        extra={
+            "task_id": id,
+            "task_lock_status": task_lock.status.value if task_lock.status else None,
+        },
+    )
 
     # Allow continuing conversation even after task is done
     # This supports multi-turn conversation after complex task completion
     if task_lock.status == Status.done:
+        chat_logger.info(
+            "[DEBUG] improve() - Task is done, resetting to allow new messages",
+            extra={"task_id": id},
+        )
         # Reset status to allow processing new messages
         task_lock.status = Status.confirming
         # Clear any existing background tasks since workforce was stopped
@@ -337,6 +356,13 @@ def improve(id: str, data: SupplementChat):
                 f" {e}"
             )
 
+    chat_logger.info(
+        "[DEBUG] improve() - Queueing ActionImproveData",
+        extra={
+            "task_id": id,
+            "user_question": data.question[:100],
+        },
+    )
     asyncio.run(
         task_lock.put_queue(
             ActionImproveData(data=data.question, new_task_id=data.task_id)
@@ -345,6 +371,10 @@ def improve(id: str, data: SupplementChat):
     chat_logger.info(
         "Improvement request queued with preserved context",
         extra={"project_id": id},
+    )
+    chat_logger.info(
+        "[DEBUG] improve() - Successfully queued, returning 201",
+        extra={"task_id": id},
     )
     return Response(status_code=201)
 
@@ -356,7 +386,7 @@ def supplement(id: str, data: SupplementChat):
     if task_lock.status != Status.done:
         raise UserException(code.error, "Please wait task done")
     asyncio.run(task_lock.put_queue(ActionSupplementData(data=data)))
-    chat_logger.debug("Supplement data queued", extra={"task_id": id})
+    chat_logger.info("Supplement data queued", extra={"task_id": id})
     return Response(status_code=201)
 
 
@@ -407,7 +437,7 @@ def human_reply(id: str, data: HumanReply):
     )
     task_lock = get_task_lock(id)
     asyncio.run(task_lock.put_human_input(data.agent, data.reply))
-    chat_logger.debug("Human reply processed", extra={"task_id": id})
+    chat_logger.info("Human reply processed", extra={"task_id": id})
     return Response(status_code=201)
 
 

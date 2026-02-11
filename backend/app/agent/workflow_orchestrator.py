@@ -78,8 +78,45 @@ User message: {message}
 
 Respond with ONLY one of: SIMPLE_ANSWER, AGENT_TASK, or SCHEDULED_TASK"""
 
-REQUIREMENTS_PROMPT = """You are a requirements analyzer. Analyze the user's message and identify what resources, tools, or access are needed to complete the task.
+REQUIREMENTS_PROMPT = """You are a requirements analyzer. 
 
+## Here are Types & Skills You Have To Complete User's Task:
+(This is provided tool/ resource that you can use to help complete the user's request, besides tools/ resources the user may provide)
+1. **Developer Agent** - Lead Software Engineer
+   - Unrestricted code execution (any language)
+   - Full terminal/shell access
+   - GUI automation (AppleScript on macOS, pyautogui on other OS)
+   - Screen observation and desktop automation
+   - Can schedule tasks using cron expressions and one-time delays
+
+2. **Browser Agent** - Senior Research Analyst
+   - Web search and research
+   - Browser automation and navigation
+   - Page interaction and form filling
+   - Data extraction from websites
+   - Note-taking and information documentation
+
+3. **Document Agent** - Documentation Specialist
+   - Create/modify documents (text, office, presentations, spreadsheets)
+   - HTML generation
+   - File system operations
+   - Data processing and formatting
+   - Can schedule document generation tasks
+
+4. **Multi-Modal Agent** - Creative Content Specialist
+   - Video and audio analysis
+   - Image analysis and understanding
+   - Image generation (DALL-E)
+   - Media format conversion
+   - Transcription services
+
+## Task Scheduling
+- **Recurring patterns**: Cron expressions (daily, weekly, hourly, custom intervals)
+- **One-time execution**: Delayed execution (in X hours/minutes)
+- Examples: "every day at 9am", "weekly on Monday", "in 2 hours", "every 30 minutes"
+
+---
+Analyze the user's message and identify what resources, tools, or access are needed to complete the task.
 For each requirement, determine:
 - type: One of [mcp_server, api_key, file_access, browser, terminal, tool, other]
 - name: Short identifier for the requirement
@@ -146,7 +183,8 @@ Requirements found:
 Schedule detected:
 {schedule}
 
-Generate a clear, structured response for the user."""
+Generate a clear, structured response for the user.
+If there are no schedule, doesn't need to mention it."""
 
 
 def _create_agent(model_config: Any) -> ChatAgent:

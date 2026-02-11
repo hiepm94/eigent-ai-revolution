@@ -127,7 +127,7 @@ export function WorkflowPanel({
         await updatePlan(projectId, {
           update_type: 'modify_task',
           task_id: planTaskId,
-          task_data: { content } as PlanTask,
+          task_data: { id: planTaskId, content } as PlanTask,
         });
       } catch (error) {
         console.error('Failed to modify task:', error);

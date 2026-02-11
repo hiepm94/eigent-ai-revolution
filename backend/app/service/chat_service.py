@@ -60,12 +60,14 @@ from app.service.workflow import (
     WorkflowPhase,
 )
 from app.service.workflow_handler import (
+    get_original_message,
     get_plan_draft,
     get_workflow_state,
     handle_phase1_step1,
     handle_phase1_step2,
     handle_phase1_step3,
     handle_plan_update,
+    store_original_message,
 )
 from app.utils.event_loop_utils import set_main_event_loop
 from app.utils.file_utils import get_working_directory
@@ -610,15 +612,53 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                                     "feedback": question[:100],
                                 },
                             )
-                            # Update the plan based on feedback
-                            update_payload = PlanUpdatePayload(
-                                update_type=PlanUpdateType.REJECT,
-                                feedback=question,
+                            
+                            # Directly regenerate the plan with feedback
+                            # (skip the REJECT update to avoid duplicate plan_draft events)
+                            logger.info(
+                                "[INTERACTIVE-WORKFLOW] Regenerating plan with feedback...",
+                                extra={"project_id": options.project_id},
                             )
-                            async for event in handle_plan_update(
-                                task_lock, update_payload
-                            ):
-                                yield event
+                            
+                            # Get the original message and requirements
+                            original_msg = get_original_message(task_lock) or options.question
+                            updated_msg = f"{original_msg}\n\nUser feedback: {question}"
+                            store_original_message(task_lock, updated_msg)
+                            
+                            requirements = (
+                                current_workflow_state.requirements
+                                if current_workflow_state.requirements
+                                else []
+                            )
+                            schedule = (
+                                current_workflow_state.schedule_suggestion
+                            )
+                            
+                            # Regenerate the plan with the new context
+                            if workforce is not None:
+                                async for event in handle_phase1_step3(
+                                    task_lock,
+                                    options,
+                                    requirements,
+                                    schedule,
+                                    workforce,
+                                ):
+                                    yield event
+                            else:
+                                # If no workforce, send plan update to indicate feedback was received
+                                update_payload = PlanUpdatePayload(
+                                    update_type=PlanUpdateType.REJECT,
+                                    feedback=question,
+                                )
+                                async for event in handle_plan_update(
+                                    task_lock, update_payload
+                                ):
+                                    yield event
+                            
+                            logger.info(
+                                "[INTERACTIVE-WORKFLOW] Plan regenerated with feedback",
+                                extra={"project_id": options.project_id},
+                            )
                             continue
 
                     logger.info(

@@ -27,6 +27,7 @@ class WorkflowPhase(str, Enum):
     CANCELLED = "cancelled"
 
 
+
 class UnderstandingStep(str, Enum):
     CLASSIFY_ANALYZE = "step1"
     COLLECT_VALIDATE = "step2"
@@ -78,6 +79,7 @@ class ScheduleSuggestion(BaseModel):
     is_recurring: bool = False
 
 
+
 class WorkflowState(BaseModel):
     phase: WorkflowPhase
     step: UnderstandingStep | None = None
@@ -86,6 +88,7 @@ class WorkflowState(BaseModel):
     validation_results: dict[str, bool] = Field(default_factory=dict)
     schedule_suggestion: ScheduleSuggestion | None = None
     is_ready_to_start: bool = False
+
 
 
 class TaskStatus(str, Enum):

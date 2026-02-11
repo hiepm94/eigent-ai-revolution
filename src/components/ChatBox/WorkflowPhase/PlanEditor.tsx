@@ -63,7 +63,13 @@ function TaskRow({
   const [editValue, setEditValue] = useState(task.content);
 
   const handleSave = () => {
+    console.info('[PlanEditor] Task save triggered', {
+      taskId: task.id,
+      hasChange: editValue !== task.content,
+      disabled,
+    });
     if (editValue.trim() && editValue !== task.content) {
+      console.info('[PlanEditor] Modifying task', { taskId: task.id });
       onModify(editValue.trim());
     }
     setIsEditing(false);
@@ -230,15 +236,33 @@ export function PlanEditor({
 }: PlanEditorProps) {
   const [newTaskContent, setNewTaskContent] = useState('');
 
+  console.info('[PlanEditor] Rendering PlanEditor', {
+    hasPlanDraft: !!planDraft,
+    isReadyToStart,
+    disabled,
+    taskCount: planDraft?.tasks.length || 0,
+  });
+
   if (!planDraft) {
     return null;
   }
 
   const handleAddTask = () => {
+    console.info('[PlanEditor] Add task triggered', {
+      hasContent: !!newTaskContent.trim(),
+    });
     if (newTaskContent.trim()) {
       onAddTask(newTaskContent.trim());
       setNewTaskContent('');
     }
+  };
+
+  const handleStartExecution = () => {
+    console.info('[PlanEditor] Start execution clicked', {
+      isReadyToStart,
+      disabled,
+    });
+    onStartExecution();
   };
 
   const handleMoveTask = (index: number, direction: 'up' | 'down') => {
@@ -310,7 +334,7 @@ export function PlanEditor({
         <Button
           variant="primary"
           size="md"
-          onClick={onStartExecution}
+          onClick={handleStartExecution}
           disabled={disabled || !isReadyToStart}
           className="w-full"
         >
@@ -318,7 +342,12 @@ export function PlanEditor({
           Start Task
         </Button>
         <p className="text-center text-xs text-text-secondary">
-          💡 You can also modify the plan by chatting with the assistant
+          💡 <strong>Tip:</strong> You can also refine the plan by typing
+          suggestions in the chat box below
+        </p>
+        <p className="text-center text-xs text-text-secondary">
+          Examples: "Add a review step", "Make it faster", "Use a different
+          tool"
         </p>
       </div>
     </div>
