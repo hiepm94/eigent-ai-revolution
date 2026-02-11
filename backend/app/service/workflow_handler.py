@@ -44,20 +44,27 @@ from app.service.workflow import (
 logger = logging.getLogger("workflow_handler")
 
 
-def store_workflow_state(task_lock: TaskLock, state: WorkflowState) -> None:
+def store_workflow_state(task_lock: TaskLock, state: WorkflowState | None) -> None:
     """Store workflow state in TaskLock for persistence across SSE events."""
     if not hasattr(task_lock, "workflow_state"):
         task_lock.workflow_state = None
     task_lock.workflow_state = state
-    logger.info(
-        "[DEBUG] Workflow state stored",
-        extra={
-            "task_id": task_lock.id,
-            "phase": state.phase.value,
-            "step": state.step.value if state.step else None,
-            "is_ready_to_start": state.is_ready_to_start,
-        },
-    )
+    
+    if state is None:
+        logger.info(
+            "[DEBUG] Workflow state cleared",
+            extra={"task_id": task_lock.id},
+        )
+    else:
+        logger.info(
+            "[DEBUG] Workflow state stored",
+            extra={
+                "task_id": task_lock.id,
+                "phase": state.phase.value,
+                "step": state.step.value if state.step else None,
+                "is_ready_to_start": state.is_ready_to_start,
+            },
+        )
 
 
 def get_workflow_state(task_lock: TaskLock) -> WorkflowState | None:
@@ -683,3 +690,152 @@ async def handle_plan_update(
             "can_start": plan_draft.can_start,
         },
     )
+
+
+async def handle_post_execution_followup(
+    task_lock: TaskLock,
+    options: Any,
+    followup_message: str,
+    model_config: Any,
+) -> AsyncGenerator[str, None]:
+    """
+    Handle follow-up messages after execution has completed.
+    
+    This handler:
+    1. Analyzes the previous execution result
+    2. Analyzes the new user message
+    3. Determines what work needs to be done next (delta plan)
+    4. Creates an updated plan with only new tasks
+    5. Avoids duplicate work by excluding already-completed tasks
+    
+    Args:
+        task_lock: Current task lock with conversation history
+        options: Chat options containing model configuration
+        followup_message: The new user message/feedback
+        model_config: Model configuration for agents
+    """
+    logger.info(
+        "[POST-EXECUTION] Starting post-execution follow-up handler",
+        extra={
+            "task_id": task_lock.id,
+            "followup_length": len(followup_message),
+        },
+    )
+    
+    try:
+        # Get previous execution context
+        previous_result = task_lock.last_task_result or "No previous result"
+        original_message = get_original_message(task_lock) or options.question
+        
+        logger.info(
+            "[POST-EXECUTION] Analyzing previous execution and new request",
+            extra={
+                "task_id": task_lock.id,
+                "original_msg_length": len(original_message),
+                "prev_result_length": len(previous_result),
+            },
+        )
+        
+        # Analyze the follow-up in context of previous work
+        # Determine request type with full context
+        full_context = (
+            f"PREVIOUS WORK:\n{previous_result}\n\n"
+            f"ORIGINAL REQUEST:\n{original_message}\n\n"
+            f"FOLLOW-UP REQUEST:\n{followup_message}"
+        )
+        
+        request_type = await classify_request(
+            full_context,
+            model_config,
+        )
+        
+        logger.info(
+            "[POST-EXECUTION] Request classified",
+            extra={
+                "task_id": task_lock.id,
+                "request_type": request_type,
+            },
+        )
+        
+        # For simple answers, respond directly without planning
+        if request_type == RequestType.SIMPLE_ANSWER:
+            logger.info(
+                "[POST-EXECUTION] Treating as simple answer follow-up",
+                extra={"task_id": task_lock.id},
+            )
+            # Store the follow-up in conversation
+            store_original_message(task_lock, full_context)
+            
+            # Simple answer will be handled in chat_service main loop
+            # Just proceed without changing phase
+            return
+        
+        # For agent tasks and scheduled tasks, analyze requirements
+        # focusing on what still needs to be done
+        requirements = await analyze_requirements(
+            full_context,
+            model_config,
+        )
+        
+        logger.info(
+            "[POST-EXECUTION] Requirements analyzed",
+            extra={
+                "task_id": task_lock.id,
+                "requirement_count": len(requirements),
+            },
+        )
+        
+        # Detect schedule if present
+        schedule = await detect_schedule(full_context)
+        
+        logger.info(
+            "[POST-EXECUTION] Schedule detection complete",
+            extra={
+                "task_id": task_lock.id,
+                "has_schedule": schedule is not None,
+            },
+        )
+        
+        # Reset workflow state for new planning phase
+        workflow_state = WorkflowState(
+            phase=WorkflowPhase.UNDERSTANDING,
+            step=UnderstandingStep.CLASSIFY,
+            request_type=request_type,
+            requirements=requirements,
+            schedule_suggestion=schedule,
+            is_ready_to_start=False,
+        )
+        store_workflow_state(task_lock, workflow_state)
+        
+        logger.info(
+            "[POST-EXECUTION] Workflow state reset for new planning",
+            extra={
+                "task_id": task_lock.id,
+                "phase": WorkflowPhase.UNDERSTANDING.value,
+            },
+        )
+        
+        # Update stored message with full context
+        store_original_message(task_lock, full_context)
+        
+        # Signal that we're ready for plan generation (same as normal flow)
+        yield sse_json(
+            Action.workflow_state.value,
+            workflow_state.model_dump(mode="json"),
+        )
+        
+        logger.info(
+            "[POST-EXECUTION] Follow-up handler complete, ready for plan generation",
+            extra={"task_id": task_lock.id},
+        )
+        
+    except Exception as e:
+        logger.error(
+            "[POST-EXECUTION] Error handling follow-up",
+            extra={
+                "task_id": task_lock.id,
+                "error": str(e),
+            },
+            exc_info=True,
+        )
+        raise

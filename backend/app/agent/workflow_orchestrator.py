@@ -114,7 +114,7 @@ REQUIREMENTS_PROMPT = """You are a requirements analyzer.
 - **Recurring patterns**: Cron expressions (daily, weekly, hourly, custom intervals)
 - **One-time execution**: Delayed execution (in X hours/minutes)
 - Examples: "every day at 9am", "weekly on Monday", "in 2 hours", "every 30 minutes"
-
+Known you will schedule on your own so user don't have to provide things like automation tools.
 ---
 Analyze the user's message and identify what resources, tools, or access are needed to complete the task.
 For each requirement, determine:

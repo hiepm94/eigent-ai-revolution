@@ -455,6 +455,7 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                     extra={
                         "project_id": options.project_id,
                         "start_event_loop": start_event_loop,
+                        "task_status": task_lock.status,
                     },
                 )
                 wf_state = (
@@ -498,6 +499,73 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                         "ActionImproveData: "
                         f"'{question[:100]}...'"
                     )
+                
+                # Check if this is a follow-up after execution completion
+                is_post_execution_followup = (
+                    not start_event_loop and task_lock.status == Status.done
+                )
+                if is_post_execution_followup:
+                    logger.info(
+                        "[POST-EXECUTION] Follow-up message received after execution completed",
+                        extra={
+                            "project_id": options.project_id,
+                            "previous_result_length": len(task_lock.last_task_result or ""),
+                        },
+                    )
+                    # Reset task_lock status to allow new planning phase
+                    task_lock.status = Status.processing
+                    
+                    # Handle post-execution follow-up
+                    if USE_INTERACTIVE_WORKFLOW:
+                        logger.info(
+                            "[POST-EXECUTION] Preparing for fresh analysis with previous context",
+                            extra={"project_id": options.project_id},
+                        )
+                        
+                        # Store enhanced message with previous execution context
+                        original = get_original_message(task_lock) or options.question
+                        enhanced_msg = f"{original}\n\n[Follow-up after execution]\n{question}"
+                        store_original_message(task_lock, enhanced_msg)
+                        
+                        logger.info(
+                            "[POST-EXECUTION] Starting fresh Phase 1 Step 1 analysis with full context",
+                            extra={"project_id": options.project_id},
+                        )
+                        # Call Phase 1 Step 1 which will do full classification and analysis
+                        # with the enhanced message including previous results
+                        async for event in handle_phase1_step1(
+                            task_lock, options, enhanced_msg, options
+                        ):
+                            yield event
+                        
+                        # Check if simple answer was provided
+                        workflow_state = get_workflow_state(task_lock)
+                        if (
+                            workflow_state
+                            and workflow_state.phase == WorkflowPhase.COMPLETED
+                        ):
+                            logger.info(
+                                "[POST-EXECUTION] Simple answer provided, waiting for next input",
+                                extra={"project_id": options.project_id},
+                            )
+                            continue
+                        
+                        # For agent tasks, it will fall through to Phase 1 Step 2
+                        logger.info(
+                            "[POST-EXECUTION] Proceeding with Phase 1 Step 2 (collecting requirements)",
+                            extra={"project_id": options.project_id},
+                        )
+                        continue
+                    else:
+                        # Fallback: store the follow-up message for analysis
+                        original = get_original_message(task_lock) or options.question
+                        enhanced_msg = f"{original}\n\n[Follow-up after execution]\n{question}"
+                        store_original_message(task_lock, enhanced_msg)
+                        
+                        logger.info(
+                            "[POST-EXECUTION] Preserved previous execution results in conversation history",
+                            extra={"project_id": options.project_id},
+                        )
 
                 is_exceeded, total_length = check_conversation_history_length(
                     task_lock
@@ -532,10 +600,13 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                     current_workflow_state = get_workflow_state(task_lock)
 
                     # Handle follow-up messages during active workflow phases
+                    # BUT: Skip if task execution already completed (status=done)
+                    # because post-execution follow-ups need fresh planning
                     if (
                         current_workflow_state
                         and current_workflow_state.phase
                         == WorkflowPhase.UNDERSTANDING
+                        and task_lock.status != Status.done
                     ):
                         if (
                             current_workflow_state.step
@@ -1223,6 +1294,13 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                 # end event format)
                 yield sse_json("end", end_message)
                 logger.info("[LIFECYCLE] Sent 'end' SSE event to frontend")
+                
+                # Clear workflow state to allow fresh planning on follow-up
+                from app.service.workflow_handler import store_workflow_state
+                store_workflow_state(task_lock, None)
+                logger.info(
+                    "[LIFECYCLE] Workflow state cleared for multi-turn support"
+                )
 
                 # Continue loop to accept new
                 # questions (don't break, don't
@@ -2084,6 +2162,13 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                         " reset for project "
                         f"{options.project_id}"
                     )
+                
+                # Clear workflow state to allow fresh planning on follow-up
+                from app.service.workflow_handler import store_workflow_state
+                store_workflow_state(task_lock, None)
+                logger.info(
+                    "[LIFECYCLE] Workflow state cleared for multi-turn support"
+                )
             elif item.action == Action.supplement:
                 # Check if this might be a misrouted second question
                 if camel_task is None:
