@@ -276,11 +276,16 @@ def improve(id: str, data: SupplementChat):
 
     # Allow continuing conversation even after task is done
     # This supports multi-turn conversation after complex task completion
+    is_post_execution_followup = False
     if task_lock.status == Status.done:
         chat_logger.info(
-            "[DEBUG] improve() - Task is done, resetting to allow new messages",
+            "[DEBUG] improve() - Task is done, marking as post-execution follow-up",
             extra={"task_id": id},
         )
+        # Mark this as a post-execution follow-up
+        is_post_execution_followup = True
+        # Set a flag on task_lock to preserve the post-execution context
+        task_lock.is_post_execution_followup = True
         # Reset status to allow processing new messages
         task_lock.status = Status.confirming
         # Clear any existing background tasks since workforce was stopped

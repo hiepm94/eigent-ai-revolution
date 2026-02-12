@@ -475,11 +475,44 @@ async def handle_phase1_step3(
     if not original_message:
         original_message = options.question
 
+    # For post-execution follow-ups, include previous execution context in the task content
+    # This helps the plan generation avoid duplicates and continue from previous work
+    task_content = original_message
+    if (
+        hasattr(task_lock, "conversation_history")
+        and task_lock.conversation_history
+    ):
+        # Look for previous task results in conversation
+        for entry in reversed(task_lock.conversation_history):
+            if entry.get("role") == "task_result":
+                task_data = entry.get("content", {})
+                prev_content = task_data.get("task_content", "")
+                prev_result = task_data.get("task_result", "")
+                if prev_content and prev_result:
+                    logger.info(
+                        "[POST-EXECUTION-PLAN] Including previous execution context in plan generation",
+                        extra={
+                            "task_id": task_lock.id,
+                            "prev_content_len": len(prev_content),
+                            "prev_result_len": len(prev_result),
+                        },
+                    )
+                    task_content = (
+                        f"PREVIOUS EXECUTION:\n"
+                        f"Task: {prev_content}\n"
+                        f"Result: {prev_result}\n\n"
+                        f"NEW REQUEST/FOLLOW-UP:\n{original_message}\n\n"
+                        f"Instructions: Review previous execution above. "
+                        f"In the new plan, avoid duplicating steps already done. "
+                        f"Focus on improvements, additional requirements, or changes requested in the follow-up."
+                    )
+                    break
+
     from camel.tasks import Task as CamelTask
 
     decompose_task = CamelTask(
         id=str(uuid.uuid4()),
-        content=original_message,
+        content=task_content,
     )
 
     plan_tasks: list[PlanTask] = []

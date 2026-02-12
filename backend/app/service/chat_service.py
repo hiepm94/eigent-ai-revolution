@@ -58,6 +58,7 @@ from app.service.workflow import (
     PlanUpdateType,
     UnderstandingStep,
     WorkflowPhase,
+    WorkflowState,
 )
 from app.service.workflow_handler import (
     get_original_message,
@@ -68,6 +69,7 @@ from app.service.workflow_handler import (
     handle_phase1_step3,
     handle_plan_update,
     store_original_message,
+    store_workflow_state,
 )
 from app.utils.event_loop_utils import set_main_event_loop
 from app.utils.file_utils import get_working_directory
@@ -501,17 +503,39 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                     )
                 
                 # Check if this is a follow-up after execution completion
+                # Flag is set in chat_controller.py when improve is called on a done task
                 is_post_execution_followup = (
-                    not start_event_loop and task_lock.status == Status.done
+                    not start_event_loop 
+                    and hasattr(task_lock, "is_post_execution_followup")
+                    and task_lock.is_post_execution_followup
                 )
+                logger.info(
+                    "[POST-EXECUTION-CHECK] Checking if follow-up after execution",
+                    extra={
+                        "project_id": options.project_id,
+                        "start_event_loop": start_event_loop,
+                        "has_flag": hasattr(task_lock, "is_post_execution_followup"),
+                        "flag_value": getattr(task_lock, "is_post_execution_followup", False),
+                        "is_post_execution": is_post_execution_followup,
+                    },
+                )
+                
                 if is_post_execution_followup:
                     logger.info(
                         "[POST-EXECUTION] Follow-up message received after execution completed",
                         extra={
                             "project_id": options.project_id,
                             "previous_result_length": len(task_lock.last_task_result or ""),
+                            "question": question[:100],
                         },
                     )
+                    # Clear the flag after detecting post-execution to prevent re-triggering
+                    task_lock.is_post_execution_followup = False
+                    
+                    # Store the follow-up question BEFORE resetting status
+                    # This preserves it in conversation history
+                    task_lock.add_conversation("user", question)
+                    
                     # Reset task_lock status to allow new planning phase
                     task_lock.status = Status.processing
                     
@@ -522,9 +546,30 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                             extra={"project_id": options.project_id},
                         )
                         
+                        # Retrieve previous task results from conversation history
+                        previous_context = ""
+                        if task_lock.conversation_history:
+                            # Look for the last task_result entry in conversation
+                            for entry in reversed(task_lock.conversation_history):
+                                if entry.get("role") == "task_result":
+                                    task_data = entry.get("content", {})
+                                    previous_context = collect_previous_task_context(
+                                        task_data.get("working_directory", ""),
+                                        task_data.get("task_content", ""),
+                                        task_data.get("task_result", ""),
+                                    )
+                                    logger.info(
+                                        "[POST-EXECUTION] Retrieved previous task context",
+                                        extra={
+                                            "project_id": options.project_id,
+                                            "context_length": len(previous_context),
+                                        },
+                                    )
+                                    break
+                        
                         # Store enhanced message with previous execution context
                         original = get_original_message(task_lock) or options.question
-                        enhanced_msg = f"{original}\n\n[Follow-up after execution]\n{question}"
+                        enhanced_msg = f"{previous_context}\n\n[Follow-up based on previous execution]\n{question}"
                         store_original_message(task_lock, enhanced_msg)
                         
                         logger.info(
@@ -550,11 +595,100 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                             )
                             continue
                         
-                        # For agent tasks, it will fall through to Phase 1 Step 2
+                        # For agent tasks, skip Step 2 (requirements validation) and go directly to planning
+                        # This is for post-execution follow-ups where requirements are already known
                         logger.info(
-                            "[POST-EXECUTION] Proceeding with Phase 1 Step 2 (collecting requirements)",
+                            "[POST-EXECUTION] Skipping Step 2 (requirements validation), jumping to plan generation",
                             extra={"project_id": options.project_id},
                         )
+                        
+                        # Get requirements from previous execution or current analysis
+                        requirements = (
+                            workflow_state.requirements
+                            if workflow_state and workflow_state.requirements
+                            else []
+                        )
+                        schedule = (
+                            workflow_state.schedule_suggestion
+                            if workflow_state
+                            else None
+                        )
+                        
+                        logger.info(
+                            "[POST-EXECUTION] Proceeding directly to Step 3 with previous context",
+                            extra={
+                                "project_id": options.project_id,
+                                "requirement_count": len(requirements),
+                                "has_schedule": schedule is not None,
+                            },
+                        )
+                        
+                        # Create workforce if needed for plan generation
+                        if workforce is None:
+                            logger.info(
+                                "[POST-EXECUTION] Creating workforce for plan generation",
+                                extra={"project_id": options.project_id},
+                            )
+                            (workforce, mcp) = await construct_workforce(options)
+                            for new_agent in options.new_agents:
+                                workforce.add_single_agent_worker(
+                                    format_agent_description(new_agent),
+                                    await new_agent_model(new_agent, options),
+                                )
+                        
+                        # Update workflow state to Step 3 (plan generation)
+                        step3_state = WorkflowState(
+                            phase=WorkflowPhase.UNDERSTANDING,
+                            step=UnderstandingStep.PLAN_EDIT,
+                            status_message="Generating execution plan based on previous execution and new requirements...",
+                            requirements=requirements,
+                            schedule_suggestion=schedule,
+                        )
+                        store_workflow_state(task_lock, step3_state)
+                        
+                        logger.info(
+                            "[POST-EXECUTION] Calling plan generation (Step 3)",
+                            extra={"project_id": options.project_id},
+                        )
+                        
+                        # # Send status update before starting plan generation
+                        # yield sse_json(
+                        #     Action.planning.value,
+                        #     {"status": "in_progress", "message": "Generating revised execution plan with previous execution context..."},
+                        # )
+                        
+                        # logger.info(
+                        #     "[POST-EXECUTION] Sending planning status update",
+                        #     extra={"project_id": options.project_id},
+                        # )
+                        
+                        # Call plan generation with full context
+                        async for event in handle_phase1_step3(
+                            task_lock,
+                            options,
+                            requirements,
+                            schedule,
+                            workforce,
+                        ):
+                            yield event
+                        
+                        logger.info(
+                            "[POST-EXECUTION] Plan generation complete",
+                            extra={"project_id": options.project_id},
+                        )
+                        
+                        # # Yield final workflow state to indicate plan is ready
+                        # final_state = get_workflow_state(task_lock)
+                        # if final_state:
+                        #     logger.info(
+                        #         "[POST-EXECUTION] Yielding final workflow state",
+                        #         extra={"project_id": options.project_id},
+                        #     )
+                        #     yield sse_json(
+                        #         Action.workflow_state.value,
+                        #         final_state.model_dump(mode="json"),
+                        #     )
+                        
                         continue
                     else:
                         # Fallback: store the follow-up message for analysis
@@ -600,26 +734,24 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                     current_workflow_state = get_workflow_state(task_lock)
 
                     # Handle follow-up messages during active workflow phases
-                    # BUT: Skip if task execution already completed (status=done)
-                    # because post-execution follow-ups need fresh planning
                     if (
                         current_workflow_state
                         and current_workflow_state.phase
                         == WorkflowPhase.UNDERSTANDING
-                        and task_lock.status != Status.done
                     ):
                         if (
                             current_workflow_state.step
                             == UnderstandingStep.COLLECT_VALIDATE
                         ):
                             # User sent a follow-up during Step 2 (collecting requirements)
-                            # Treat as additional context and auto-confirm to proceed
+                            # OR post-execution follow-up just completed Step 1 analysis
                             logger.info(
-                                "[INTERACTIVE-WORKFLOW] Follow-up during Step 2 - "
-                                "treating as user confirmation to proceed",
+                                "[INTERACTIVE-WORKFLOW] Follow-up during Step 2 or post-execution Step 1 complete - "
+                                "auto-confirming to proceed to Step 3",
                                 extra={
                                     "project_id": options.project_id,
                                     "follow_up": question[:100],
+                                    "is_post_execution": is_post_execution_followup,
                                 },
                             )
                             # Store the follow-up as additional context
@@ -1955,7 +2087,32 @@ async def step_solve(options: Chat, request: Request, task_lock: TaskLock):
                 task_lock.status = Status.confirmed
                 yield sse_json("confirmed", {"question": question})
 
-                clean_task_content = question + options.summary_prompt
+                # For post-execution follow-ups, include previous execution context
+                execution_context = question
+                if (
+                    hasattr(task_lock, "conversation_history")
+                    and task_lock.conversation_history
+                ):
+                    # Look for previous task results in conversation
+                    for entry in reversed(task_lock.conversation_history):
+                        if entry.get("role") == "task_result":
+                            task_data = entry.get("content", {})
+                            prev_result = task_data.get("task_result", "")
+                            if prev_result:
+                                logger.info(
+                                    "[POST-EXECUTION-EXEC] Including previous execution results in task execution",
+                                    extra={
+                                        "project_id": options.project_id,
+                                        "prev_result_len": len(prev_result),
+                                    },
+                                )
+                                execution_context = (
+                                    f"PREVIOUS EXECUTION RESULTS:\n{prev_result}\n\n"
+                                    f"CURRENT EXECUTION:\n{question}"
+                                )
+                                break
+
+                clean_task_content = execution_context + options.summary_prompt
                 camel_task = Task(
                     content=clean_task_content, id=options.task_id
                 )
